@@ -325,6 +325,12 @@ void libretro_submit_video()
  * Called from sound::callback() (sound/sound.cpp, guarded by LIBRETRO_CORE)
  * after mixing.  Copies samples into the ring buffer and zeroes the SDL
  * stream so the SDL audio device stays silent.
+ *
+ * All-zero frames are not added to the ring.  During disc seeks every audio
+ * chip (including the OGG layer) outputs zeros; buffering that silence and
+ * submitting it to RetroArch would cause ~seek-duration audio lag after every
+ * seek — the most visible symptom being attract-mode A/V desync in Space Ace.
+ * Sound-chip audio that happens to be non-zero is unaffected by this check.
  */
 void libretro_audio_post(uint8_t *stream, int len)
 {
@@ -333,23 +339,31 @@ void libretro_audio_post(uint8_t *stream, int len)
     const int16_t *src = reinterpret_cast<const int16_t *>(stream);
     int n = len / (int)sizeof(int16_t);
 
-    SDL_LockMutex(s_audio_mutex);
-    /* Write in at most 2 contiguous segments to handle ring wrap-around */
-    int contig = AUDIO_RING_CAP - s_audio_head;
-    int n1 = (n < contig) ? n : contig;
-    memcpy(&s_audio_ring[s_audio_head], src, (size_t)n1 * sizeof(int16_t));
-    if (n > n1)
-        memcpy(s_audio_ring, src + n1, (size_t)(n - n1) * sizeof(int16_t));
-    s_audio_head = (s_audio_head + n) % AUDIO_RING_CAP;
-    if (s_audio_count + n <= AUDIO_RING_CAP) {
-        s_audio_count += n;
-    } else {
-        /* Overflow: advance tail past overwritten data */
-        int overflow = s_audio_count + n - AUDIO_RING_CAP;
-        s_audio_tail = (s_audio_tail + overflow) % AUDIO_RING_CAP;
-        s_audio_count = AUDIO_RING_CAP;
+    /* Fast scan: exit early if the whole callback buffer is silence */
+    bool has_audio = false;
+    for (int i = 0; i < n; ++i) {
+        if (src[i]) { has_audio = true; break; }
     }
-    SDL_UnlockMutex(s_audio_mutex);
+
+    if (has_audio) {
+        SDL_LockMutex(s_audio_mutex);
+        /* Write in at most 2 contiguous segments to handle ring wrap-around */
+        int contig = AUDIO_RING_CAP - s_audio_head;
+        int n1 = (n < contig) ? n : contig;
+        memcpy(&s_audio_ring[s_audio_head], src, (size_t)n1 * sizeof(int16_t));
+        if (n > n1)
+            memcpy(s_audio_ring, src + n1, (size_t)(n - n1) * sizeof(int16_t));
+        s_audio_head = (s_audio_head + n) % AUDIO_RING_CAP;
+        if (s_audio_count + n <= AUDIO_RING_CAP) {
+            s_audio_count += n;
+        } else {
+            /* Overflow: advance tail past overwritten data */
+            int overflow = s_audio_count + n - AUDIO_RING_CAP;
+            s_audio_tail = (s_audio_tail + overflow) % AUDIO_RING_CAP;
+            s_audio_count = AUDIO_RING_CAP;
+        }
+        SDL_UnlockMutex(s_audio_mutex);
+    }
 
     memset(stream, 0, len); /* silence the SDL audio device */
 }
@@ -628,9 +642,10 @@ bool retro_load_game(const struct retro_game_info *info)
     /* 2. Locate .commands and build argv                                  */
     /*                                                                     */
     /* Accepted layouts:                                                   */
-    /*   a) <game>.commands          — parse directly                      */
-    /*   b) <game>.daphne/           — look for <game>.commands inside,   */
-    /*                                 then auto-generate from directory   */
+    /*   a) <game>.commands           — parse directly                     */
+    /*   b) <game>.daphne/ (or dir)   — look for <game>.commands inside,  */
+    /*                                   then auto-generate from directory */
+    /*   c) <game>.zip / <game>.zlua  — Singe zip ROM: use -zlua directly */
     /* ------------------------------------------------------------------ */
 
     /* dir_path already normalised above */
@@ -644,28 +659,58 @@ bool retro_load_game(const struct retro_game_info *info)
     std::string gamename = (dot_pos != std::string::npos)
                            ? base.substr(0, dot_pos) : base;
 
+    /* Lowercase file extension helper */
+    auto lower_ext = [](const std::string &s) -> std::string {
+        size_t d = s.rfind('.');
+        if (d == std::string::npos) return "";
+        std::string e = s.substr(d);
+        for (auto &c : e) c = (char)tolower((unsigned char)c);
+        return e;
+    };
+    std::string path_ext = lower_ext(base);
+
+    /* Detect whether info->path points to a zip/zlua file directly.
+     * In that case the adjacent sibling files (framefile, etc.) live in
+     * parent_dir, not inside dir_path. */
+    bool is_zip_path = (path_ext == ".zip" || path_ext == ".zlua");
+
+    /* Directory used to search for sibling files (.commands, .txt, .singe…) */
+    std::string search_dir = is_zip_path ? parent_dir : dir_path;
+
     std::vector<std::string> str_args;
 
-    /* Try <dir>/<game>.commands first */
-    std::string cmd_file = dir_path + "/" + gamename + ".commands";
-    if (!parse_commands_file(cmd_file.c_str(), str_args) &&
-        !parse_commands_file(dir_path.c_str(), str_args))
+    auto file_exists = [](const std::string &p) {
+        struct stat st;
+        return (stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode));
+    };
+
+    /* Case (a): path IS the .commands file, or <search_dir>/<game>.commands */
+    std::string cmd_file = search_dir + "/" + gamename + ".commands";
+    bool loaded_commands = parse_commands_file(cmd_file.c_str(), str_args);
+
+    /* Also try path itself as commands — but only for text-like extensions
+     * (.commands or no extension).  Never try to parse a binary zip as text. */
+    if (!loaded_commands && path_ext != ".zip" && path_ext != ".zlua")
+        loaded_commands = parse_commands_file(dir_path.c_str(), str_args);
+
+    if (!loaded_commands)
     {
-        /* Auto-generate from directory contents */
+        /* Auto-generate from detected content */
         str_args.clear();
         str_args.push_back("hypseus");
 
-        std::string framefile = dir_path + "/" + gamename + ".txt";
-        std::string singe_script = dir_path + "/" + gamename + ".singe";
-        std::string zlua_pkg    = dir_path + "/" + gamename + ".zlua";
+        std::string framefile    = search_dir + "/" + gamename + ".txt";
+        std::string singe_script = search_dir + "/" + gamename + ".singe";
+        std::string zlua_pkg     = search_dir + "/" + gamename + ".zlua";
+        std::string zip_pkg      = search_dir + "/" + gamename + ".zip";
 
-        auto file_exists = [](const std::string &p) {
-            FILE *f = fopen(p.c_str(), "r");
-            if (f) { fclose(f); return true; }
-            return false;
-        };
-
-        if (file_exists(singe_script)) {
+        if (is_zip_path) {
+            /* Case (c): path is a .zip or .zlua — use it directly with -zlua */
+            str_args.push_back("singe");
+            str_args.push_back("vldp");
+            str_args.push_back("-framefile"); str_args.push_back(framefile);
+            str_args.push_back("-zlua");      str_args.push_back(dir_path);
+        } else if (file_exists(singe_script)) {
             str_args.push_back("singe");
             str_args.push_back("vldp");
             str_args.push_back("-framefile"); str_args.push_back(framefile);
@@ -675,6 +720,12 @@ bool retro_load_game(const struct retro_game_info *info)
             str_args.push_back("vldp");
             str_args.push_back("-framefile"); str_args.push_back(framefile);
             str_args.push_back("-zlua");      str_args.push_back(zlua_pkg);
+        } else if (file_exists(zip_pkg)) {
+            /* .zip inside a game directory treated the same as .zlua */
+            str_args.push_back("singe");
+            str_args.push_back("vldp");
+            str_args.push_back("-framefile"); str_args.push_back(framefile);
+            str_args.push_back("-zlua");      str_args.push_back(zip_pkg);
         } else {
             /* DAPHNE ROM game */
             str_args.push_back(gamename);
