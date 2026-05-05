@@ -89,8 +89,6 @@ static SDL_Surface *g_lr_surface         = NULL;    /* off-screen render target 
 static SDL_Surface *g_blit_surface       = NULL;    /* 320x240 software scoreboard/overlay scratch */
 /* Serializes vid_setup_yuv_overlay() (VLDP thread) against vid_blit() (emu thread). */
 static SDL_Mutex   *g_yuv_lifecycle_mutex = NULL;
-static uint8_t     *g_rgb_frame_buf       = nullptr; /* ARGB8888 output of YUV→RGB conversion */
-static size_t       g_rgb_frame_size      = 0;
 static uint8_t     *g_yuv_packed_buf        = nullptr; /* contiguous YV12 input for SDL_ConvertPixels */
 static int          g_yuv_packed_size       = 0;
 static bool         g_lr_scoreboard_visible = true;
@@ -977,7 +975,6 @@ bool deinit_display()
 #ifdef LIBRETRO_CORE
     if (g_lr_surface)          { SDL_DestroySurface(g_lr_surface);        g_lr_surface          = NULL; }
     if (g_yuv_lifecycle_mutex) { SDL_DestroyMutex(g_yuv_lifecycle_mutex); g_yuv_lifecycle_mutex = NULL; }
-    delete[] g_rgb_frame_buf;  g_rgb_frame_buf  = nullptr; g_rgb_frame_size = 0;
     delete[] g_yuv_packed_buf; g_yuv_packed_buf = nullptr; g_yuv_packed_size = 0;
 #endif
 
@@ -2587,7 +2584,12 @@ void vid_blit()
     // and is recommended by SDL_Rendercopy() documentation.
 
     SDL_SetRenderTarget(g_renderer, g_mix_texture);
+#ifndef LIBRETRO_CORE
+    /* In libretro, g_lr_surface is fully overwritten by the YUV→RGB conversion
+     * below (or retains the previous frame when needs_update is false).
+     * SDL_RenderClear would redundantly memset 1.2 MB to black every frame. */
     SDL_RenderClear(g_renderer);
+#endif
 
     // Does YUV texture need update from the YUV "surface"?
     // Don't try if the vldp object didn't call setup_yuv_surface (in noldp mode)
@@ -2602,26 +2604,22 @@ void vid_blit()
             g_yuv_video_needs_update = false;
 
             int bw = g_yuv_surface->width, bh = g_yuv_surface->height;
-            size_t frame_bytes = (size_t)g_lr_surface->pitch * g_lr_surface->h;
-            if (frame_bytes > g_rgb_frame_size) {
-                delete[] g_rgb_frame_buf;
-                g_rgb_frame_buf  = new uint8_t[frame_bytes]();
-                g_rgb_frame_size = frame_bytes;
-            }
 
             if (g_yuv_skip) {
                 if (g_yuv_display == YUV_VISIBLE) g_yuv_skip = false;
-                /* Fill frame buffer with blank colour (black or CRT-blue). */
+                /* Write blank colour directly into the render surface. */
+                size_t frame_bytes = (size_t)g_lr_surface->pitch * g_lr_surface->h;
                 if (g_yuv_blue) {
                     uint32_t blue = 0x000000FFu;
-                    uint32_t *dst = reinterpret_cast<uint32_t *>(g_rgb_frame_buf);
-                    for (size_t i = 0; i < frame_bytes / 4; ++i) dst[i] = blue;
+                    uint32_t *p = reinterpret_cast<uint32_t *>(g_lr_surface->pixels);
+                    for (size_t i = 0; i < frame_bytes / 4; ++i) p[i] = blue;
                 } else {
-                    memset(g_rgb_frame_buf, 0, frame_bytes);
+                    memset(g_lr_surface->pixels, 0, frame_bytes);
                 }
             } else {
                 /* Pack the three separate YUV planes into contiguous YV12
-                 * (Y | V | U) then SDL_ConvertPixels straight to the frame buf. */
+                 * (Y | V | U) then SDL_ConvertPixels directly into g_lr_surface,
+                 * skipping the intermediate g_rgb_frame_buf copy. */
                 int uv_sz = (bw / 2) * (bh / 2);
                 int pneed  = bw * bh + 2 * uv_sz;
                 if (pneed > g_yuv_packed_size) {
@@ -2629,22 +2627,19 @@ void vid_blit()
                     g_yuv_packed_buf  = new uint8_t[pneed];
                     g_yuv_packed_size = pneed;
                 }
-                memcpy(g_yuv_packed_buf,                    g_yuv_surface->Yplane, (size_t)(bw * bh));
-                memcpy(g_yuv_packed_buf + bw * bh,           g_yuv_surface->Vplane, (size_t)uv_sz);
-                memcpy(g_yuv_packed_buf + bw * bh + uv_sz,   g_yuv_surface->Uplane, (size_t)uv_sz);
+                memcpy(g_yuv_packed_buf,                  g_yuv_surface->Yplane, (size_t)(bw * bh));
+                memcpy(g_yuv_packed_buf + bw * bh,         g_yuv_surface->Vplane, (size_t)uv_sz);
+                memcpy(g_yuv_packed_buf + bw * bh + uv_sz, g_yuv_surface->Uplane, (size_t)uv_sz);
 
                 SDL_ConvertPixels(bw, bh,
-                    SDL_PIXELFORMAT_YV12,     g_yuv_packed_buf, bw,
-                    SDL_PIXELFORMAT_ARGB8888, g_rgb_frame_buf,  g_lr_surface->pitch);
+                    SDL_PIXELFORMAT_YV12,     g_yuv_packed_buf,     bw,
+                    SDL_PIXELFORMAT_ARGB8888, g_lr_surface->pixels, g_lr_surface->pitch);
             }
         }
+        /* When needs_update is false, g_lr_surface already holds the last frame. */
         SDL_UnlockMutex(g_yuv_surface->mutex);
     }
     if (g_yuv_lifecycle_mutex) SDL_UnlockMutex(g_yuv_lifecycle_mutex);
-
-    if (g_rgb_frame_buf && g_lr_surface)
-        memcpy(g_lr_surface->pixels, g_rgb_frame_buf,
-               (size_t)g_lr_surface->pitch * g_lr_surface->h);
 
 #else  /* !LIBRETRO_CORE — original texture-based path */
 
@@ -2714,30 +2709,42 @@ void vid_blit()
             int src_str = surf->pitch / 4;
             int sw = src_rect->w, sh = src_rect->h;
             int sx0 = src_rect->x, sy0 = src_rect->y;
+            /* Precompute valid horizontal pixel range — avoids a branch per pixel. */
+            int dx_start = std::max(0, -dx0);
+            int dx_end   = std::min(dw, vw - dx0);
+            if (dx_start >= dx_end) return;
+            /* Bresenham initial state for sx at dx = dx_start (one-time division). */
+            int sx_init     = sx0 + (dx_start * sw) / dw;
+            int sx_err_init = (dx_start * sw) % dw;
             for (int dy = 0; dy < dh; ++dy) {
-                int sy = sy0 + (dy * sh) / dh;
+                int sy   = sy0 + (dy * sh) / dh;
                 int ydst = dy0 + dy;
                 if (ydst < 0 || ydst >= vh) continue;
-                for (int dx = 0; dx < dw; ++dx) {
-                    int sx = sx0 + (dx * sw) / dw;
-                    int xdst = dx0 + dx;
-                    if (xdst < 0 || xdst >= vw) continue;
-                    uint32_t sp = src[sy * src_str + sx]; /* RGBA8888 */
-                    uint8_t  sa = sp & 0xFFu;             /* A = low byte */
-                    if (sa == 0) continue;
-                    uint8_t sr = (sp >> 24) & 0xFFu;
-                    uint8_t sg = (sp >> 16) & 0xFFu;
-                    uint8_t sb = (sp >>  8) & 0xFFu;
-                    uint32_t *dp = &dst[ydst * dst_str + xdst];
-                    if (sa == 255u) {
-                        *dp = 0xFF000000u | ((uint32_t)sr << 16) | ((uint32_t)sg << 8) | sb;
-                    } else {
-                        uint32_t ia = 255u - sa;
-                        uint8_t r = (uint8_t)(((uint32_t)sr * sa + ((*dp >> 16) & 0xFFu) * ia + 127u) / 255u);
-                        uint8_t g = (uint8_t)(((uint32_t)sg * sa + ((*dp >>  8) & 0xFFu) * ia + 127u) / 255u);
-                        uint8_t b = (uint8_t)(((uint32_t)sb * sa + ( *dp        & 0xFFu) * ia + 127u) / 255u);
-                        *dp = 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
+                int sx_cur = sx_init;
+                int sx_err = sx_err_init;
+                uint32_t       *row_dst = &dst[ydst * dst_str];
+                const uint32_t *row_src = &src[sy * src_str];
+                for (int dx = dx_start; dx < dx_end; ++dx) {
+                    uint32_t sp = row_src[sx_cur]; /* RGBA8888 */
+                    uint8_t  sa = sp & 0xFFu;      /* A = low byte */
+                    if (sa != 0) {
+                        uint8_t sr = (sp >> 24) & 0xFFu;
+                        uint8_t sg = (sp >> 16) & 0xFFu;
+                        uint8_t sb = (sp >>  8) & 0xFFu;
+                        uint32_t *dp = &row_dst[dx0 + dx];
+                        if (sa == 255u) {
+                            *dp = 0xFF000000u | ((uint32_t)sr << 16) | ((uint32_t)sg << 8) | sb;
+                        } else {
+                            uint32_t ia = 255u - sa;
+                            uint8_t r  = (uint8_t)(((uint32_t)sr * sa + ((*dp >> 16) & 0xFFu) * ia + 127u) / 255u);
+                            uint8_t gc = (uint8_t)(((uint32_t)sg * sa + ((*dp >>  8) & 0xFFu) * ia + 127u) / 255u);
+                            uint8_t b  = (uint8_t)(((uint32_t)sb * sa + ( *dp        & 0xFFu) * ia + 127u) / 255u);
+                            *dp = 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)gc << 8) | b;
+                        }
                     }
+                    /* Bresenham step: advance sx_cur without division */
+                    sx_err += sw;
+                    if (sx_err >= dw) { sx_cur++; sx_err -= dw; }
                 }
             }
         };

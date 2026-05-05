@@ -8,7 +8,7 @@
  *
  * Synchronisation:
  *   - s_frame_produced: semaphore signalled by emu thread inside vid_blit()
- *     after pixel readback into s_video_buf.
+ *     after g_lr_surface has been fully composited.
  *   - s_frame_consumed: semaphore signalled by retro_run() after submitting
  *     the frame to the frontend, allowing emu to continue.
  *
@@ -80,7 +80,6 @@ static retro_input_state_t         input_state_cb = nullptr;
  * ---------------------------------------------------------------------- */
 static SDL_sem    *s_frame_produced  = nullptr;
 static SDL_sem    *s_frame_consumed  = nullptr;
-static uint32_t   *s_video_buf      = nullptr;
 static int         s_vid_w          = 640;
 static int         s_vid_h          = 480;
 /* Set by libretro_submit_video() (emu thread) when dimensions change; read
@@ -119,6 +118,15 @@ static Sint16     s_mouse_dy     = 0;
 static bool       s_mouse_moved  = false;
 static uint8_t    s_mouse_btns   = 0;   /* bit0=left/trigger, bit1=right   */
 static uint8_t    s_mouse_prev   = 0;
+
+/* -------------------------------------------------------------------------
+ * Video copy buffer
+ * retro_run() copies g_lr_surface here then posts s_frame_consumed before
+ * calling video_cb(), so the emu thread unblocks after ~0.15 ms (memcpy)
+ * instead of after the full video_cb() latency (~1 ms GPU upload).
+ * ---------------------------------------------------------------------- */
+static uint32_t *s_video_buf    = nullptr;
+static size_t    s_video_buf_sz = 0;
 
 /* -------------------------------------------------------------------------
  * Emulation thread
@@ -235,10 +243,10 @@ void libretro_submit_video()
     if (w <= 0) w = (int)video::get_video_width();
     if (h <= 0) h = (int)video::get_video_height();
 
-    /* Reallocate buffer if dimensions changed */
-    if (w != s_vid_w || h != s_vid_h || !s_video_buf) {
-        delete[] s_video_buf;
-        s_video_buf = new uint32_t[w * h]();
+    /* Update stored dimensions; notify frontend of geometry change if needed.
+     * Pixel data stays in g_lr_surface — retro_run() reads it directly while
+     * the emu thread is blocked on s_frame_consumed (guaranteed exclusion). */
+    if (w != s_vid_w || h != s_vid_h) {
         s_vid_w = w;
         s_vid_h = h;
         SDL_AtomicSet(&s_geometry_changed, 1);
@@ -247,32 +255,16 @@ void libretro_submit_video()
 #endif
     }
 
-    /* For the SDL software renderer, SDL_RenderPresent() copies the internal
-     * back buffer to g_lr_surface.  Read directly from g_lr_surface->pixels
-     * rather than SDL_RenderReadPixels(), which reads from the (now empty)
-     * back buffer after the swap and returns black pixels. */
-    SDL_Surface *lr_surf = video::get_lr_surface();
-    if (lr_surf && lr_surf->pixels) {
-        int row_bytes = w * (int)sizeof(uint32_t);
-        int surf_pitch = lr_surf->pitch;
-        if (surf_pitch == row_bytes) {
-            memcpy(s_video_buf, lr_surf->pixels, (size_t)(h * row_bytes));
-        } else {
-            /* pitch mismatch: copy row by row */
-            const uint8_t *src = static_cast<const uint8_t *>(lr_surf->pixels);
-            uint8_t       *dst = reinterpret_cast<uint8_t *>(s_video_buf);
-            for (int y = 0; y < h; ++y, src += surf_pitch, dst += row_bytes)
-                memcpy(dst, src, (size_t)row_bytes);
-        }
-    }
-
 #ifdef DEBUG
-    ++s_pix_logged;
-    if ((s_pix_logged <= 3 || (s_pix_logged % 150) == 0) && s_video_buf) {
-        uint32_t center = s_video_buf[(h/2) * w + w/2];
-        uint32_t tl     = s_video_buf[0];
-        fprintf(stderr, "[hypseus-libretro] submit_video #%d %dx%d center=0x%08x tl=0x%08x\n",
-                s_pix_logged, w, h, center, tl);
+    {
+        SDL_Surface *lr_surf = video::get_lr_surface();
+        ++s_pix_logged;
+        if ((s_pix_logged <= 3 || (s_pix_logged % 150) == 0) && lr_surf && lr_surf->pixels) {
+            const uint32_t *px = static_cast<const uint32_t *>(lr_surf->pixels);
+            int p4 = lr_surf->pitch / 4;
+            fprintf(stderr, "[hypseus-libretro] submit_video #%d %dx%d center=0x%08x tl=0x%08x\n",
+                    s_pix_logged, w, h, px[(h/2)*p4 + w/2], px[0]);
+        }
     }
 #endif
 
@@ -458,11 +450,11 @@ static void drain_audio()
 {
     if (!s_audio_mutex || !audio_batch_cb) return;
 
-    /* Allow up to 3 video-frames of audio backlog.  Beyond that we drop the
-     * oldest samples to prevent the ring from growing stale and causing lag. */
-    static const int k_max = sound::FREQ / 60 * 2 * 3; /* 4410 int16_t */
-    /* Buffer sized for the maximum we will ever copy in one call */
-    static int16_t tmp[sound::FREQ / 60 * 2 * 3];
+    /* Allow up to 4 video-frames of audio backlog.  Beyond that we drop the
+     * oldest samples to prevent the ring from growing stale and causing lag.
+     * 44100 Hz / 59.94 fps * 2 ch * 4 frames ≈ 5886 int16_t; round up. */
+    static const int k_max = 5888;
+    static int16_t tmp[5888];
     int avail = 0;
 
     SDL_LockMutex(s_audio_mutex);
@@ -558,7 +550,11 @@ void retro_get_system_av_info(struct retro_system_av_info *info)
     info->geometry.max_width    = 1920;
     info->geometry.max_height   = 1080;
     info->geometry.aspect_ratio = (float)s_vid_w / (float)s_vid_h;
-    info->timing.fps            = 60.0;
+    /* VLDP runs at 29.97 * 2 = 59.94 fields/s (VBLANKS_PER_KILOSECOND = 59940).
+     * Declaring the actual rate lets RetroArch compute the correct audio/video
+     * ratio (44100/59.94 ≈ 735.74 samples/frame) and prevents the ~1 ms/s
+     * A/V drift that occurs when 60.0 is declared instead. */
+    info->timing.fps            = 29.97 * 2.0;
     info->timing.sample_rate    = sound::FREQ;
 }
 
@@ -578,7 +574,7 @@ void retro_deinit(void)
     if (s_frame_consumed) { SDL_DestroySemaphore(s_frame_consumed); s_frame_consumed = nullptr; }
     if (s_audio_mutex)    { SDL_DestroyMutex(s_audio_mutex);        s_audio_mutex    = nullptr; }
     if (s_input_mutex)    { SDL_DestroyMutex(s_input_mutex);        s_input_mutex    = nullptr; }
-    delete[] s_video_buf; s_video_buf = nullptr;
+    s_vid_w = 640; s_vid_h = 480;
 }
 
 bool retro_load_game(const struct retro_game_info *info)
@@ -905,6 +901,13 @@ bool retro_load_game(const struct retro_game_info *info)
                         "scoreboard overlays will be unavailable\n");
     }
 
+    /* Use a small SDL audio buffer (512 samples ≈ 11.6 ms) so the capture
+     * callback fires roughly every retro_run() call (16.67 ms) instead of
+     * every 46 ms (2048-sample default).  This makes audio delivery to
+     * audio_batch_cb() more uniform and reduces A/V desync caused by bursty
+     * sample delivery. */
+    sound::set_buf_size(512);
+
     LR_LOG("sound::init");
     if (!sound::init()) {
         LR_FAIL("sound::init");
@@ -980,9 +983,6 @@ bool retro_load_game(const struct retro_game_info *info)
     if (s_vid_w <= 0) s_vid_w = 640;
     if (s_vid_h <= 0) s_vid_h = 480;
 
-    delete[] s_video_buf;
-    s_video_buf = new uint32_t[s_vid_w * s_vid_h]();
-
     struct retro_game_geometry geom;
     geom.base_width   = (unsigned)s_vid_w;
     geom.base_height  = (unsigned)s_vid_h;
@@ -1027,9 +1027,15 @@ void retro_unload_game(void)
     if (s_frame_produced) while (SDL_SemTryWait(s_frame_produced) == 0) {}
     if (s_frame_consumed) while (SDL_SemTryWait(s_frame_consumed) == 0) {}
 
+    /* Free the video copy buffer; it will be reallocated on next load. */
+    delete[] s_video_buf;
+    s_video_buf    = nullptr;
+    s_video_buf_sz = 0;
+
     /* Reset per-session state for clean restart */
     reset_quitflag();
     s_first_run  = true;
+    s_vid_w = 640; s_vid_h = 480;
     s_pad_state  = 0;
     s_pad_prev   = 0;
     s_mouse_x = s_mouse_y = 0;
@@ -1158,12 +1164,30 @@ void retro_run(void)
     }
 
     if (got_frame) {
-        video_cb(s_video_buf, (unsigned)s_vid_w, (unsigned)s_vid_h,
-                 (size_t)s_vid_w * sizeof(uint32_t));
-        SDL_SemPost(s_frame_consumed);
+        /* Copy g_lr_surface into s_video_buf, then post s_frame_consumed
+         * *before* calling video_cb().  This decouples the emu thread from
+         * video_cb() latency (GPU texture upload can take ~1 ms on some
+         * drivers).  The emu unblocks after the memcpy (~0.15 ms) instead
+         * of after video_cb() completes, recovering the ~4 fps gap vs
+         * standalone at 60 Hz.  s_video_buf is only touched here (retro_run
+         * thread) so no locking is needed. */
+        SDL_Surface *lr = video::get_lr_surface();
+        if (lr && lr->pixels) {
+            size_t frame_sz = (size_t)lr->pitch * (size_t)lr->h;
+            if (frame_sz > s_video_buf_sz) {
+                delete[] s_video_buf;
+                s_video_buf    = new uint32_t[(frame_sz + 3) / 4];
+                s_video_buf_sz = frame_sz;
+            }
+            memcpy(s_video_buf, lr->pixels, frame_sz);
+            SDL_SemPost(s_frame_consumed);
+            video_cb(s_video_buf, (unsigned)s_vid_w, (unsigned)s_vid_h, (size_t)lr->pitch);
+        } else {
+            SDL_SemPost(s_frame_consumed);
+            video_cb(NULL, (unsigned)s_vid_w, (unsigned)s_vid_h, 0);
+        }
     } else {
-        /* Timeout: signal duplicate frame without touching s_video_buf
-         * (emu thread may be reallocating it during a resolution change) */
+        /* Timeout: signal duplicate frame */
         video_cb(NULL, (unsigned)s_vid_w, (unsigned)s_vid_h, 0);
     }
 
