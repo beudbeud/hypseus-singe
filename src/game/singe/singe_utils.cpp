@@ -42,7 +42,15 @@ const char* get_ramdir_path()
 {
     static std::string dir = [] {
         std::string ramdir = g_homedir.get_ramdir();
-        if (ramdir.empty()) ramdir = "ram";
+        if (ramdir.empty()) {
+            /* m_ramdir is not set explicitly — use <homedir>/ram so that
+             * fstream and mpo_file_exists receive an absolute path.
+             * Falling back to the bare relative "ram" would fail whenever the
+             * process working directory differs from the homedir (e.g. in the
+             * libretro core). */
+            std::string hd = g_homedir.get_homedir();
+            ramdir = (!hd.empty() && hd != ".") ? (hd + "/ram") : "ram";
+        }
         return ramdir + "/";
     }();
 
