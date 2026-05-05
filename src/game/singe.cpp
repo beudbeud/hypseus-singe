@@ -299,7 +299,14 @@ void singe::start()
         }
 
         m_running = false;
+#ifndef LIBRETRO_CORE
+        /* In the libretro context there is no "natural" game exit: quitflag is
+         * always set externally by retro_unload_game() (restart or close).
+         * Lua onShutdown() may loop on discGetCurrentFrame() which is frozen
+         * once think_delay() stops being called, causing SDL_WaitThread() in
+         * retro_unload_game() to block indefinitely (observed with Mad Dog). */
         g_pSingeOut->sep_call_lua("onShutdown", "");
+#endif
     } // end if there was no startup error
 
     // always call sep_shutdown just to make sure everything gets cleaned up
