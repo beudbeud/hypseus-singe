@@ -58,6 +58,8 @@ using namespace std;
 
 static bool g_hotkey = false;
 static bool m_config_valid = true;
+static bool g_libretro_input = false;
+static void (*g_input_hook)()  = nullptr;
 
 constexpr double DEFAULT_TRIGGER_FACTOR = 0.995; // to trigger the trigger :)
 const int JOY_AXIS_MID  = (int)(MAX_AXIS * (0.75));  // how far they have to move the
@@ -903,6 +905,13 @@ int SDL_input_init()
 // initializes the keyboard (and joystick if one is present)
 // returns 1 if successful, 0 on error
 {
+    if (g_libretro_input) {
+        while (!g_coin_queue.empty()) g_coin_queue.pop();
+        g_sticky_coin_cycles = (Uint32)(STICKY_COIN_SECONDS * cpu::get_hz(0));
+        idle_timer = refresh_ms_time();
+        return 1;
+    }
+
     int result = 0;
 
     // Set ini based argument list (Note: will override cli arguments)
@@ -1016,6 +1025,7 @@ SDL_Gamepad* get_gamepad_id(int id)
 // shut down the necessary
 void SDL_input_shutdown(void)
 {
+    if (g_libretro_input) return;
     for (int i = 0; i < MAX_GAMECONTROLLER; i++) {
 
         if (g_controllers[i].gamepad)
@@ -1031,15 +1041,17 @@ void SDL_input_shutdown(void)
 // checks to see if there is incoming input, and acts on it
 void SDL_check_input()
 {
-    SDL_Event event{};
+    if (g_input_hook) {
+        g_input_hook();
+    } else {
+        SDL_Event event{};
 
-    while ((SDL_PollEvent(&event)) && (!get_quitflag())) {
-        process_event(&event);
+        while ((SDL_PollEvent(&event)) && (!get_quitflag()))
+            process_event(&event);
+
+        if (get_idleexit() > 0 && elapsed_ms_time(idle_timer) > get_idleexit())
+            set_quitflag();
     }
-
-    // added by JFA for -idleexit
-    if (get_idleexit() > 0 && elapsed_ms_time(idle_timer) > get_idleexit())
-        set_quitflag();
 
     // if the coin queue has something entered into it
     if (!g_coin_queue.empty()) {
@@ -1802,4 +1814,10 @@ void do_gamepad_rumble(Uint8 str, Uint8 len, Uint8 player)
 
         return;
     }
+}
+
+void SDL_set_libretro_input(void (*hook)())
+{
+    g_libretro_input = true;
+    g_input_hook     = hook;
 }

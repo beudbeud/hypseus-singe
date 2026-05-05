@@ -11,9 +11,17 @@ option(CPU_DEBUG        "CPU Debug"             OFF)
 option(BUILD_SINGE      "Singe"                 ON)
 option(BUILDBOT         "Buildbot"              OFF)
 option(ASAN             "Address Sanitizer"     OFF)
+option(LIBRETRO         "Build libretro core"   OFF)
 
 # Abstract out -espath ES extension: Use .hypseus NOT .daphne
 option(ABSTRACT_SINGE   "Redefine Singe LUA Rewrites"     ON)
+
+# When building the libretro core, propagate the define to all sub-libraries.
+if(LIBRETRO)
+    add_definitions(-DLIBRETRO_CORE)
+    # Shared library requires position-independent code in all sub-libraries.
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
 
 if (NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE "Release")
@@ -76,7 +84,12 @@ string(REGEX REPLACE "^v" "" RESULT ${VER_TAG})
 string(REGEX REPLACE "[-\\.]" ";" RESULT ${RESULT})
 list(GET RESULT 0 VER_MAJOR)
 list(GET RESULT 1 VER_MINOR)
-list(GET RESULT 2 VER_PATCH)
+list(LENGTH RESULT RESULT_LEN)
+if(RESULT_LEN GREATER 2)
+    list(GET RESULT 2 VER_PATCH)
+else()
+    set(VER_PATCH "0")
+endif()
 if(NOT "${VER_GIT_COUNT}" EQUAL "0")
     set(VER_TAG "${VER_TAG}-${VER_GIT_COUNT}")
 endif()
@@ -145,27 +158,60 @@ add_dependencies( ldp-out vldp )
 add_dependencies( game vldp )
 add_dependencies( sound vldp )
 
-add_executable( hypseus hypseus.cpp globals.h )
-target_link_libraries( hypseus plog io timer sound video cpu game ${Vorbis_Enc_LIBRARY} Vorbis::vorbis ${OGG_LIBRARIES} ${VORBISFILE_LIBRARIES} ${Vorbis_File_LIBRARY} SDL3::SDL3 SDL3::Headers SDL3_ttf::SDL3_ttf SDL3_image::SDL3_image SDL3_mixer::SDL3_mixer ${LIBZIP_LIBRARY} )
+# Common link libraries shared by both targets
+set(HYPSEUS_LINK_LIBS
+    plog io timer sound video cpu game
+    ${Vorbis_Enc_LIBRARY} Vorbis::vorbis ${OGG_LIBRARIES}
+    ${VORBISFILE_LIBRARIES} ${Vorbis_File_LIBRARY}
+    SDL3::SDL3 SDL3::Headers SDL3_ttf::SDL3_ttf
+    SDL3_image::SDL3_image SDL3_mixer::SDL3_mixer ${LIBZIP_LIBRARY}
+)
 
-if(ASAN)
-    target_link_options(hypseus PRIVATE -fsanitize=address -fno-omit-frame-pointer -g)
+# ---- Standalone executable ----
+if(NOT LIBRETRO)
+    add_executable( hypseus hypseus.cpp globals.h )
+    target_link_libraries( hypseus ${HYPSEUS_LINK_LIBS} )
+
+    if(ASAN)
+        target_link_options(hypseus PRIVATE -fsanitize=address -fno-omit-frame-pointer -g)
+    endif()
+
+    #[[
+    set_source_files_properties( testvldp.cpp PROPERTIES COMPILE_FLAGS -DSHOW_FRAMES)
+    add_executable( testvldp testvldp.cpp )
+    target_link_libraries( testvldp video vldp ${SDL2_LIBRARIES} ${SDL2_TTF_LIBRARY} ${SDL2_MIXER_LIBRARY} ${SDL2IMAGE_LIBRARY})
+    ]]
+
+    if(BUILDBOT)
+        add_custom_command( TARGET hypseus
+            POST_BUILD
+            COMMAND ${CMAKE_STRIP} $<TARGET_FILE:hypseus>
+            COMMAND ${CMAKE_COMMAND} -E remove -f hypseus.zip
+            COMMAND 7za a -mpass=4 -mfb=255 -y -tzip hypseus.zip $<TARGET_FILE:hypseus>
+            COMMAND ${CMAKE_COMMAND} -E md5sum hypseus.zip > hypseus.md5
+            COMMENT "Create zip and md5 for buildbot")
+    endif()
 endif()
 
-#[[
-set_source_files_properties( testvldp.cpp PROPERTIES COMPILE_FLAGS -DSHOW_FRAMES)
-add_executable( testvldp testvldp.cpp )
-target_link_libraries( testvldp PRIVATE video vldp sdl3_deps )
-]]
+# ---- Libretro core shared library ----
+if(LIBRETRO)
+    add_library( hypseus_singe_libretro SHARED
+        libretro/libretro.cpp
+        hypseus.cpp    # getters/setters (main() excluded by LIBRETRO_CORE)
+        globals.h
+    )
+    target_include_directories( hypseus_singe_libretro PRIVATE
+        ${PROJECT_BINARY_DIR}   # config.h
+        ${PROJECT_SOURCE_DIR}   # so libretro.cpp can reach "../globals.h" etc.
+    )
+    target_link_libraries( hypseus_singe_libretro ${HYPSEUS_LINK_LIBS} )
+    # libretro cores must not have a "lib" prefix
+    set_target_properties( hypseus_singe_libretro PROPERTIES PREFIX "" )
 
-if(BUILDBOT)
-    add_custom_command( TARGET hypseus
-        POST_BUILD
-	COMMAND ${CMAKE_STRIP} $<TARGET_FILE:hypseus>
-        COMMAND ${CMAKE_COMMAND} -E remove -f hypseus.zip
-        COMMAND 7za a -mpass=4 -mfb=255 -y -tzip hypseus.zip $<TARGET_FILE:hypseus>
-        COMMAND ${CMAKE_COMMAND} -E md5sum hypseus.zip > hypseus.md5
-        COMMENT "Create zip and md5 for buildbot")
+    if(ASAN)
+        target_link_options(hypseus_singe_libretro PRIVATE
+            -fsanitize=address -fno-omit-frame-pointer -g)
+    endif()
 endif()
 
 set(CPACK_PACKAGE_NAME "Hypseus Singe")

@@ -23,6 +23,10 @@ if( HAVE_DEPRECATED_NON_PROTOTYPE )
     string( APPEND LIBMPEG2_CFLAGS " -Wno-deprecated-non-prototype" )
 endif()
 
+if( CMAKE_POSITION_INDEPENDENT_CODE )
+    string( APPEND LIBMPEG2_CFLAGS " -fPIC" )
+endif()
+
 externalproject_add( libmpeg2
 	PREFIX ${CMAKE_CURRENT_BINARY_DIR}/3rdparty
 	URL ../../../src/3rdparty/libmpeg2/libmpeg2-master.tgz

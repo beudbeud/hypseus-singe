@@ -35,6 +35,7 @@ const char *get_hypseus_version();
 
 unsigned char get_filename(char *s, unsigned char n);
 void set_quitflag();
+void reset_quitflag();
 unsigned char get_quitflag();
 bool change_dir(const char *pszNewDir);
 void set_cur_dir(const char *exe_loc);
