@@ -844,6 +844,33 @@ void sep_shutdown(void)
         g_se_lua_context = nullptr;
         g_bLuaInitialized = false;
     }
+
+    // Reset first-use guards so that the next sep_startup() assigns resource
+    // IDs starting at 0.  sep_startup() pushes a dummy slot-0 into every
+    // vector; the sep_*_reset() calls in the first load/font/sound/music
+    // functions clear that dummy before adding real resources.  If these flags
+    // stay false across a restart the reset is skipped and every resource ID
+    // is off by 1, corrupting all Lua script indexing.
+    g_firstload = true;
+    g_firstfont = true;
+    g_firstsnd  = true;
+
+    // Close SDL_mixer explicitly before SDL_QuitSubSystem(SDL_INIT_AUDIO)
+    // tears down the audio subsystem.  Without this, Mix's internal device
+    // reference is dangling after restart and Mix_LoadMUS / Mix_PlayMusic
+    // will fail or crash.  Setting g_firstmix = true causes sep_init_mixer()
+    // to call Mix_OpenAudio() again on the next musicLoad().
+    if (!g_firstmix) {
+        Mix_HaltMusic();
+        Mix_CloseAudio();
+        Mix_Quit();
+        g_firstmix = true;
+    }
+
+    // Restore per-session defaults that singe.cpp or the Lua script may
+    // have changed and that are not re-set by sep_startup().
+    g_se_grunt   = true;
+    g_fontCurrent = -1;
 }
 
 static void sep_sprite_reset()

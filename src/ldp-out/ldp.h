@@ -150,6 +150,20 @@ class ldp
     // is required
     void think_delay(unsigned int);
 
+    // Advance m_start_time by ms to cancel a period during which pre_think()
+    // was not called (e.g. frontend menu open).  Prevents think_delay() from
+    // issuing a burst of catch-up pre_think() calls on resume.
+    void nudge_start_time(unsigned int ms) { m_start_time += ms; }
+
+    // Called when the frontend pauses emulation (e.g. menu open / suspend).
+    // Stops the OGG audio from advancing its file position so it stays in
+    // sync with the video on resume.  No-op on LDP types without OGG audio.
+    virtual void audio_pause_menu() {}
+
+    // Called when the frontend resumes emulation.  Restarts OGG playback
+    // from the position it was at when audio_pause_menu() was called.
+    virtual void audio_resume_menu() {}
+
     // When emulating a cpu, this function MUST be called EVERY 1 ms (according
     // to cpu's reckoning) to keep us in sync w/ the cpu.
     // This allows the cpu to do all timing calculations, which saves us from
