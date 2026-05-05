@@ -236,6 +236,8 @@ bool is_enabled();
 // (re)calculates the right-shift value to be used to mix sounds (for fast
 // division)
 void sound_recalc_rshift();
+
+void set_audio_capture_hook(void (*hook)(uint8_t *stream, int len));
 }
 
 #endif

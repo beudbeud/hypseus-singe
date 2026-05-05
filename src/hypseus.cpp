@@ -49,7 +49,9 @@ using namespace std;
 #include "config.h"
 #endif
 
+#ifndef LIBRETRO_CORE
 #include <SDL_main.h>
+#endif
 #include <SDL_image.h>
 #include <SDL_mixer.h>
 
@@ -84,6 +86,9 @@ using namespace std;
 #include "cpu/cpu.h"
 #include "game/game.h"
 
+#ifndef LIBRETRO_CORE
+# define DEFINE_GLOBALS
+#endif
 #include "globals.h"
 // some global data is stored in this file
 
@@ -117,10 +122,8 @@ unsigned char get_filename(char *s, unsigned char n)
     return (result);
 }
 
-// sets the quit flag
-void set_quitflag() { quitflag = 1; }
-
-// returns the quit flag
+void set_quitflag()   { quitflag = 1; }
+void reset_quitflag() { quitflag = 0; }
 unsigned char get_quitflag() { return (quitflag); }
 
 bool change_dir(const char *cpszNewDir)
@@ -152,6 +155,7 @@ void set_cur_dir(const char *exe_loc)
 
 /////////////////////// MAIN /////////////////////
 
+#ifndef LIBRETRO_CORE
 // the main function for both Windows and Linux <grin>
 int main(int argc, char **argv)
 {
@@ -314,6 +318,7 @@ int main(int argc, char **argv)
     SDL_Quit();
     exit(result_code);
 }
+#endif /* LIBRETRO_CORE */
 
 void set_search_offset(int i) { search_offset = i; }
 

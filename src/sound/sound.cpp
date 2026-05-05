@@ -63,6 +63,13 @@ bool g_sound_enabled = true; // whether sound is enabled
 
 bool g_bSoundMuted = false; // whether sound is muted
 
+static void (*g_audio_capture_hook)(uint8_t *, int) = nullptr;
+
+void set_audio_capture_hook(void (*hook)(uint8_t *, int))
+{
+    g_audio_capture_hook = hook;
+}
+
 struct chip *g_chip_head = NULL;     // pointer to the first sound chip in
                                      // our linked list of chips's
 unsigned int g_uSoundChipNextID = 0; // the idea that the next chip to get
@@ -679,6 +686,9 @@ void callback(void *data, Uint8 *stream, int length)
 
     // do the actual mixing now
     g_soundmix_callback(stream, length);
+
+    if (g_audio_capture_hook)
+        g_audio_capture_hook(stream, length);
 }
 
 void writedata(Uint8 id, Uint8 data)
@@ -863,6 +873,7 @@ void shutdown_chip()
         delete[] temp->buffer;
         delete temp;
     }
+    g_chip_head = NULL;
     UNLOCK_AUDIO(g_audio_device);
 }
 

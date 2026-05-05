@@ -111,6 +111,7 @@ void vid_setup_yuv_overlay (int width, int height);
 int vid_update_yuv_overlay (uint8_t *Yplane, uint8_t *Uplane, uint8_t *Vplane, int Ypitch, int Upitch, int Vpitch);
 int vid_update_yuv_texture (uint8_t *Yplane, uint8_t *Uplane, uint8_t *Vplane, int Ypitch, int Upitch, int Vpitch);
 void vid_free_yuv_overlay ();
+bool vid_get_yuv_pixel(int vx, int vy, uint8_t *Y_out, uint8_t *U_out, uint8_t *V_out);
 
 void vid_update_overlay_surface(SDL_Surface *tx);
 void vid_blit();
@@ -132,6 +133,9 @@ bool draw_othergfx(int which, int x, int y);
 void free_bmps();
 SDL_Window *get_window();
 SDL_Renderer *get_renderer();
+SDL_Surface *get_lr_surface();
+void vid_set_scoreboard_visible(bool visible);
+void vid_set_frame_ready_hook(void (*hook)());
 SDL_Texture *get_screen();
 SDL_Texture *get_yuv_screen();
 SDL_Surface *get_screen_blitter();

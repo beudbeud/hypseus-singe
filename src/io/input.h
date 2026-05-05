@@ -83,6 +83,7 @@ typedef struct
 
 int SDL_input_init();
 void SDL_input_shutdown();
+void SDL_set_libretro_input(void (*hook)());
 
 void SDL_check_input();
 

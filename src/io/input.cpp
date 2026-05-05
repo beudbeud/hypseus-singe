@@ -54,7 +54,9 @@ using namespace std;
 #define strcasecmp stricmp
 #endif
 
-static bool g_hotkey = false;
+static bool   g_hotkey      = false;
+static bool   g_libretro_input = false;
+static void (*g_input_hook)()  = nullptr;
 
 constexpr double DEFAULT_TRIGGER_FACTOR = 0.995; // to trigger the trigger :)
 const int JOY_AXIS_MID  = (int)(MAX_AXIS * (0.75));  // how far they have to move the
@@ -673,6 +675,12 @@ int SDL_input_init()
 // returns 1 if successful, 0 on error
 // NOTE: Video has to be initialized BEFORE this is or else it won't work
 {
+    if (g_libretro_input) {
+        while (!g_coin_queue.empty()) g_coin_queue.pop();
+        g_sticky_coin_cycles = (Uint32)(STICKY_COIN_SECONDS * cpu::get_hz(0));
+        idle_timer = refresh_ms_time();
+        return 1;
+    }
 
     int result = 0;
 
@@ -791,6 +799,7 @@ SDL_GameController* get_gamepad_id(int i)
 // 1 = success, 0 = failure
 void SDL_input_shutdown(void)
 {
+    if (g_libretro_input) return;
     if (g_use_gamepad) {
         for (int i = 0; i < MAX_GAMECONTROLLER; i++) {
             if (g_gamepad_id[i]) {
@@ -806,15 +815,17 @@ void SDL_input_shutdown(void)
 // checks to see if there is incoming input, and acts on it
 void SDL_check_input()
 {
-    SDL_Event event{};
+    if (g_input_hook) {
+        g_input_hook();
+    } else {
+        SDL_Event event{};
 
-    while ((SDL_PollEvent(&event)) && (!get_quitflag())) {
-        process_event(&event);
+        while ((SDL_PollEvent(&event)) && (!get_quitflag()))
+            process_event(&event);
+
+        if (get_idleexit() > 0 && elapsed_ms_time(idle_timer) > get_idleexit())
+            set_quitflag();
     }
-
-    // added by JFA for -idleexit
-    if (get_idleexit() > 0 && elapsed_ms_time(idle_timer) > get_idleexit())
-        set_quitflag();
 
     // if the coin queue has something entered into it
     if (!g_coin_queue.empty()) {
@@ -1564,4 +1575,10 @@ void do_gamepad_rumble(Uint8 str, Uint8 len, Uint8 id)
         Uint16 s = (1 << (str + 0xc)) - 1;
         SDL_GameControllerRumble(g_gamepad_id[id], s, s, (0x4b << len));
     }
+}
+
+void SDL_set_libretro_input(void (*hook)())
+{
+    g_libretro_input = true;
+    g_input_hook     = hook;
 }
