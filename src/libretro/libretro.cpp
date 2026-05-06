@@ -51,6 +51,7 @@
 
 /* Emulator headers — order matters: game/ldp types must precede globals.h */
 #include "../game/game.h"
+#include "../game/singe.h"
 #include "../ldp-out/ldp.h"
 #include "../ldp-out/ldp-vldp.h"
 #define DEFINE_GLOBALS
@@ -129,12 +130,75 @@ static uint32_t *s_video_buf    = nullptr;
 static size_t    s_video_buf_sz = 0;
 
 /* -------------------------------------------------------------------------
+ * Lua state snapshot (Singe games)
+ * Written by the emu thread (libretro_update_lua_snap, called from singe.cpp
+ * after all Lua activity for the frame, before blit()).  Read by the frontend
+ * thread (retro_serialize).  A short mutex protects the buffer during the
+ * copy; sep_serialize_lua is NEVER called from the frontend thread.
+ * ---------------------------------------------------------------------- */
+static SDL_mutex *s_lua_snap_mutex = nullptr;
+static uint8_t   s_lua_snap_data[128 * 1024];
+static uint32_t  s_lua_snap_size = 0;
+
+/* -------------------------------------------------------------------------
  * Emulation thread
  * ---------------------------------------------------------------------- */
 static SDL_Thread *s_emu_thread  = nullptr;
 static bool        s_emu_started = false;
 static bool        s_first_run   = true;  /* reset in retro_unload_game for restart */
 static std::string s_last_game_path;      /* stored for retro_reset() full reload */
+
+/* -------------------------------------------------------------------------
+ * Savestate restore handshake
+ *
+ * retro_unserialize() stores the target disc frame, LDP status, and Lua
+ * state, then sets s_restore_pending and blocks on s_restore_done.
+ * libretro_singe_frame_begin() is called from the emu thread at the top of
+ * each singe game-loop iteration; it applies the restore and posts
+ * s_restore_done so retro_unserialize() can return.
+ * ---------------------------------------------------------------------- */
+static SDL_atomic_t  s_restore_pending  = {0};
+static SDL_sem      *s_restore_done     = nullptr;
+static uint32_t      s_restore_frame    = 0;
+static int           s_restore_ldp_stat = 0;
+static uint32_t      s_restore_lua_size = 0;
+static uint8_t       s_restore_lua_data[128 * 1024];
+
+/* Called from the emu thread at the top of each singe game-loop iteration.
+ * Applies a pending savestate restore (Lua state + disc seek/play) and
+ * signals retro_unserialize() that the restore is done.
+ * Returns true when a restore was performed; the caller should 'continue'. */
+bool libretro_singe_frame_begin()
+{
+    if (!SDL_AtomicGet(&s_restore_pending)) return false;
+
+    singe *sg = dynamic_cast<singe *>(g_game);
+    if (sg && s_restore_lua_size > 0)
+        sg->unserialize_lua_state(s_restore_lua_data, s_restore_lua_size);
+
+    char rf[16];
+    snprintf(rf, sizeof(rf), "%u", s_restore_frame);
+    if (g_ldp) g_ldp->pre_search(rf, true);
+    if (g_ldp && s_restore_ldp_stat == LDP_PLAYING) g_ldp->pre_play();
+
+    SDL_AtomicSet(&s_restore_pending, 0);
+    SDL_SemPost(s_restore_done);
+    return true;
+}
+
+/* Called from the emu thread after all Lua activity for the frame
+ * (after do_queued_callbacks, before blit).  Snapshots the Lua global
+ * state into a buffer that retro_serialize() reads without touching the
+ * live lua_State from the frontend thread. */
+void libretro_update_lua_snap()
+{
+    singe *sg = dynamic_cast<singe *>(g_game);
+    if (!sg || !s_lua_snap_mutex) return;
+    SDL_LockMutex(s_lua_snap_mutex);
+    s_lua_snap_size = (uint32_t)sg->serialize_lua_state(
+                         s_lua_snap_data, sizeof(s_lua_snap_data));
+    SDL_UnlockMutex(s_lua_snap_mutex);
+}
 
 /* -------------------------------------------------------------------------
  * Core options v2
@@ -284,7 +348,7 @@ void libretro_submit_video()
 
     bool menu_audio_paused = false;
     while (SDL_SemWaitTimeout(s_frame_consumed, 33) != 0) {
-        if (get_quitflag()) {
+        if (get_quitflag() || SDL_AtomicGet(&s_restore_pending)) {
             if (menu_audio_paused && g_ldp) g_ldp->audio_resume_menu();
             cpu::unpause();
             return;
@@ -561,10 +625,12 @@ void retro_get_system_av_info(struct retro_system_av_info *info)
 void retro_init(void)
 {
     /* Create synchronisation primitives */
-    s_frame_produced = SDL_CreateSemaphore(0);
-    s_frame_consumed = SDL_CreateSemaphore(0);
-    s_audio_mutex    = SDL_CreateMutex();
-    s_input_mutex    = SDL_CreateMutex();
+    s_frame_produced  = SDL_CreateSemaphore(0);
+    s_frame_consumed  = SDL_CreateSemaphore(0);
+    s_restore_done    = SDL_CreateSemaphore(0);
+    s_audio_mutex     = SDL_CreateMutex();
+    s_input_mutex     = SDL_CreateMutex();
+    s_lua_snap_mutex  = SDL_CreateMutex();
     s_audio_head = s_audio_tail = s_audio_count = 0;
 }
 
@@ -572,8 +638,10 @@ void retro_deinit(void)
 {
     if (s_frame_produced) { SDL_DestroySemaphore(s_frame_produced); s_frame_produced = nullptr; }
     if (s_frame_consumed) { SDL_DestroySemaphore(s_frame_consumed); s_frame_consumed = nullptr; }
+    if (s_restore_done)   { SDL_DestroySemaphore(s_restore_done);   s_restore_done   = nullptr; }
     if (s_audio_mutex)    { SDL_DestroyMutex(s_audio_mutex);        s_audio_mutex    = nullptr; }
     if (s_input_mutex)    { SDL_DestroyMutex(s_input_mutex);        s_input_mutex    = nullptr; }
+    if (s_lua_snap_mutex) { SDL_DestroyMutex(s_lua_snap_mutex);     s_lua_snap_mutex = nullptr; }
     s_vid_w = 640; s_vid_h = 480;
 }
 
@@ -1013,6 +1081,12 @@ void retro_unload_game(void)
     /* Ask the emulation loop to stop */
     set_quitflag();
 
+    /* Unblock the emu thread if it is blocked in the restore handshake */
+    if (SDL_AtomicGet(&s_restore_pending)) {
+        SDL_AtomicSet(&s_restore_pending, 0);
+        SDL_SemPost(s_restore_done);
+    }
+
     /* Unblock the emu thread if it is waiting on s_frame_consumed */
     if (s_frame_consumed) SDL_SemPost(s_frame_consumed);
 
@@ -1223,14 +1297,17 @@ void retro_set_controller_port_device(unsigned /*port*/, unsigned /*device*/) {}
  * Format: [header 20B] + SS_MAX_CPUS × [context 128B + mem 64KB]
  * ---------------------------------------------------------------------- */
 static const uint32_t SS_MAGIC    = 0x48595053; /* "HYPS" */
-static const uint32_t SS_VERSION  = 1;
+static const uint32_t SS_VERSION  = 3;
 static const int      SS_MAX_CPUS = 4;
 static const size_t   SS_MEM_SIZE = 0x10000;    /* 64 KB — covers full Z80/6809 space */
+
+static const size_t SS_LUA_MAX = 128 * 1024; /* reserved for Lua global state */
 
 size_t retro_serialize_size(void)
 {
     return 5 * sizeof(uint32_t)
-           + (size_t)SS_MAX_CPUS * ((size_t)cpu::MAX_CONTEXT_SIZE + SS_MEM_SIZE);
+           + (size_t)SS_MAX_CPUS * ((size_t)cpu::MAX_CONTEXT_SIZE + SS_MEM_SIZE)
+           + sizeof(uint32_t) + SS_LUA_MAX; /* lua_used size + Lua blob */
 }
 
 bool retro_serialize(void *data, size_t size)
@@ -1265,6 +1342,22 @@ bool retro_serialize(void *data, size_t size)
         memcpy(p, mem, SS_MEM_SIZE);           p += SS_MEM_SIZE;
     }
 
+    /* Lua state (Singe games): read from the snapshot written each frame by
+     * libretro_update_lua_snap() on the emu thread.  Mutex prevents a torn
+     * read while the snapshot is being updated. */
+    {
+        uint32_t lua_used = 0;
+        if (dynamic_cast<singe *>(g_game) && s_lua_snap_mutex) {
+            SDL_LockMutex(s_lua_snap_mutex);
+            lua_used = s_lua_snap_size;
+            if (lua_used > 0)
+                memcpy(p + 4, s_lua_snap_data, lua_used);
+            SDL_UnlockMutex(s_lua_snap_mutex);
+        }
+        memcpy(p, &lua_used, 4); p += 4;
+        p += SS_LUA_MAX;
+    }
+
     return true;
 }
 
@@ -1272,20 +1365,17 @@ bool retro_unserialize(const void *data, size_t size)
 {
     if (size < retro_serialize_size() || !s_emu_started || !g_ldp) return false;
 
-    cpu::pause();
-    /* Brief yield so the emu thread completes its current instruction
-     * before we overwrite registers and memory. */
-    SDL_Delay(5);
-
     const uint8_t *p = (const uint8_t *)data;
     auto r32 = [&]() -> uint32_t { uint32_t v; memcpy(&v, p, 4); p += 4; return v; };
 
-    if (r32() != SS_MAGIC || r32() != SS_VERSION) { cpu::unpause(); return false; }
+    if (r32() != SS_MAGIC || r32() != SS_VERSION) return false;
 
     uint32_t ncpus     = r32();
     uint32_t ldp_frame = r32();
     int      ldp_stat  = (int)r32();
 
+    /* CPU context + memory (non-Singe games) */
+    cpu::pause();
     for (int i = 0; i < SS_MAX_CPUS; ++i) {
         const uint8_t *ctx = p; p += cpu::MAX_CONTEXT_SIZE;
         const uint8_t *mem = p; p += SS_MEM_SIZE;
@@ -1295,14 +1385,20 @@ bool retro_unserialize(const void *data, size_t size)
             if (c->mem) memcpy(c->mem, mem, SS_MEM_SIZE);
         }
     }
-
-    /* Restore laserdisc position */
-    char frame_str[16];
-    snprintf(frame_str, sizeof(frame_str), "%u", (unsigned)ldp_frame);
-    g_ldp->pre_search(frame_str, true); /* blocking seek */
-    if (ldp_stat == LDP_PLAYING) g_ldp->pre_play();
-
     cpu::unpause();
+
+    /* Lua global state: copy to shared buffer; emu thread applies it safely */
+    uint32_t lua_used; memcpy(&lua_used, p, 4); p += 4;
+    s_restore_lua_size = (lua_used <= SS_LUA_MAX) ? lua_used : 0;
+    if (s_restore_lua_size > 0) memcpy(s_restore_lua_data, p, s_restore_lua_size);
+    p += SS_LUA_MAX;
+
+    s_restore_frame    = ldp_frame;
+    s_restore_ldp_stat = ldp_stat;
+
+    /* Signal emu thread to do Lua restore + disc seek, then wait for it */
+    SDL_AtomicSet(&s_restore_pending, 1);
+    SDL_SemWait(s_restore_done);
     return true;
 }
 

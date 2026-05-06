@@ -1,6 +1,9 @@
 #ifndef SINGE_INTERFACE_H
 #define SINGE_INTERFACE_H
 
+#include <stdint.h>
+#include <stddef.h>
+
 // increase this number every time you change something in this file!!!
 #define SINGE_INTERFACE_API_VERSION 10
 
@@ -140,7 +143,13 @@ struct singe_out_info
 	void (*sep_upgrade_overlay)(void);
 	void (*sep_fullalpha_overlay)(void);
 	void (*sep_enable_trace)(void);
-	
+
+#ifdef LIBRETRO_CORE
+	size_t (*sep_serialize_lua)(uint8_t *buf, size_t max);
+	bool   (*sep_unserialize_lua)(const uint8_t *buf, size_t size);
+	void   (*sep_reload_resources)(void);
+#endif
+
 	////////////////////////////////////////////////////////////
 };
 

@@ -85,6 +85,10 @@ class singe : public game
     void ControllerAxisProxy(Uint8 a, Sint16 v, Uint8 id);
     bool handle_cmdline_arg(const char *arg);
     void palette_calculate();
+#ifdef LIBRETRO_CORE
+    size_t serialize_lua_state(uint8_t *buf, size_t max);
+    bool   unserialize_lua_state(const uint8_t *buf, size_t size);
+#endif
     void repaint();
 
     void scoreboard_score(int, uint8_t);
@@ -363,6 +367,8 @@ class singe : public game
     bool m_crosshair;
     bool m_running;
     bool m_zlua;
+    bool m_scriptLoaded;
+    bool m_bHandleCmdlineInit;
 
     IScoreboard *m_pScoreboard;
 

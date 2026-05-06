@@ -83,5 +83,11 @@ bool get_usb_rts();
 void set_log_was_disabled(bool value);
 // end edit
 
+#ifdef LIBRETRO_CORE
+#include <cstdint>
+bool libretro_singe_frame_begin();
+void libretro_update_lua_snap();
+#endif
+
 #endif // DAPHNE_H
 
