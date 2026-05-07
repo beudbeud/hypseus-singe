@@ -710,7 +710,6 @@ bool retro_load_game(const struct retro_game_info *info)
     std::vector<std::string> datadir_candidates = {
         std::string(sys_dir) + "/hypseus",
         "/usr/share/hypseus",
-        "/usr/share/daphne",
         parent_dir,
     };
     std::string datadir;
