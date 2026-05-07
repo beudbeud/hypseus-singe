@@ -671,12 +671,14 @@ void sep_do_mouse_move(Uint16 x, Uint16 y, Sint16 xrel, Sint16 yrel, Sint8 mouse
     m_tract.mouseX[rID] = x1;
     m_tract.mouseY[rID] = y1;
 
-    // Not sure what's wrong here. I think things are getting started before Singe is ready.
+    /* Skip the Lua callback on the very first call — Singe may not be fully
+     * ready yet — but always update the position so mouseGetPosition() works
+     * correctly from the first shot. */
     if (!debounced) {
         debounced = true;
         return;
     }
-	
+
     sep_call_lua("onMouseMoved", "iiiii", x1, y1, xr, yr, mID);
 }
 

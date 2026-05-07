@@ -75,6 +75,7 @@ static retro_audio_sample_batch_t  audio_batch_cb = nullptr;
 static retro_environment_t         environ_cb     = nullptr;
 static retro_input_poll_t          input_poll_cb  = nullptr;
 static retro_input_state_t         input_state_cb = nullptr;
+static retro_log_printf_t          log_cb         = nullptr;
 
 /* -------------------------------------------------------------------------
  * Video shared state
@@ -109,6 +110,7 @@ static SDL_mutex *s_audio_mutex = nullptr;
  * ---------------------------------------------------------------------- */
 static uint32_t   s_pad_state  = 0;
 static uint32_t   s_pad_prev   = 0;   /* previous state seen by emu thread */
+static bool       s_pad_synced = false; /* true after first sync to avoid boot spurious press */
 static SDL_mutex *s_input_mutex = nullptr;
 
 /* Mouse / pointer / lightgun shared state (guarded by s_input_mutex)     */
@@ -117,8 +119,6 @@ static int        s_mouse_y      = 0;
 static Sint16     s_mouse_dx     = 0;   /* relative delta this frame       */
 static Sint16     s_mouse_dy     = 0;
 static bool       s_mouse_moved  = false;
-static uint8_t    s_mouse_btns   = 0;   /* bit0=left/trigger, bit1=right   */
-static uint8_t    s_mouse_prev   = 0;
 
 /* -------------------------------------------------------------------------
  * Video copy buffer
@@ -452,9 +452,14 @@ void libretro_process_input()
     uint32_t cur = s_pad_state;
     SDL_UnlockMutex(s_input_mutex);
 
-    uint32_t changed = cur ^ s_pad_prev;
-    if (!changed) return;
+    /* Absorb initial state on first call to avoid spurious onInputPressed. */
+    if (!s_pad_synced) {
+        s_pad_prev   = cur;
+        s_pad_synced = true;
+        return;
+    }
 
+    uint32_t changed = cur ^ s_pad_prev;
     for (int i = 0; i < k_btn_map_size; ++i) {
         uint32_t bit = 1u << k_btn_map[i].hypseus_id;
         if (!(changed & bit)) continue;
@@ -469,33 +474,21 @@ void libretro_process_input()
     /* ------------------------------------------------------------------
      * Mouse / pointer / lightgun — only for games that declare mouse use
      * ---------------------------------------------------------------- */
+    /* Position tracking — only for games that use pointing devices */
     if (!g_game->get_mouse_enabled()) return;
 
     SDL_LockMutex(s_input_mutex);
-    bool    moved = s_mouse_moved;
-    int     mx    = s_mouse_x;
-    int     my    = s_mouse_y;
-    Sint16  dx    = s_mouse_dx;
-    Sint16  dy    = s_mouse_dy;
-    uint8_t btns  = s_mouse_btns;
-    uint8_t prev  = s_mouse_prev;
+    bool   moved = s_mouse_moved;
+    int    mx    = s_mouse_x;
+    int    my    = s_mouse_y;
+    Sint16 dx    = s_mouse_dx;
+    Sint16 dy    = s_mouse_dy;
     s_mouse_dx = s_mouse_dy = 0;
     s_mouse_moved = false;
-    s_mouse_prev  = btns;
     SDL_UnlockMutex(s_input_mutex);
 
     if (moved)
         g_game->OnMouseMotion((Uint16)mx, (Uint16)my, dx, dy, NOMOUSE);
-
-    uint8_t mchanged = btns ^ prev;
-    if (mchanged & 1) {
-        if (btns & 1) g_game->input_enable(SWITCH_BUTTON1, NOMOUSE);
-        else          g_game->input_disable(SWITCH_BUTTON1, NOMOUSE);
-    }
-    if (mchanged & 2) {
-        if (btns & 2) g_game->input_enable(SWITCH_BUTTON2, NOMOUSE);
-        else          g_game->input_disable(SWITCH_BUTTON2, NOMOUSE);
-    }
 }
 
 /* =========================================================================
@@ -581,11 +574,43 @@ void retro_set_environment(retro_environment_t cb)
 {
     environ_cb = cb;
 
-    /* Signal that we require a game to be loaded */
     bool no_game = false;
     cb(RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME, &no_game);
 
     cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2, &k_core_options_v2);
+
+    static const struct retro_controller_description port0_types[] = {
+        { "Lightgun",    260 },
+        { "Mouse",       RETRO_DEVICE_MOUSE    },
+        { "Pointer",     RETRO_DEVICE_POINTER  },
+        { "RetroPad",    RETRO_DEVICE_JOYPAD   },
+    };
+    static const struct retro_controller_info ports[] = {
+        { port0_types, 4 },
+        { nullptr, 0 },
+    };
+    cb(RETRO_ENVIRONMENT_SET_CONTROLLER_INFO, (void *)ports);
+
+    static const struct retro_input_descriptor input_desc[] = {
+        /* Joypad */
+        { 0, RETRO_DEVICE_JOYPAD,   0, RETRO_DEVICE_ID_JOYPAD_A,      "Fire / Trigger" },
+        { 0, RETRO_DEVICE_JOYPAD,   0, RETRO_DEVICE_ID_JOYPAD_B,      "Reload" },
+        { 0, RETRO_DEVICE_JOYPAD,   0, RETRO_DEVICE_ID_JOYPAD_START,  "Start" },
+        { 0, RETRO_DEVICE_JOYPAD,   0, RETRO_DEVICE_ID_JOYPAD_SELECT, "Coin" },
+        /* Lightgun */
+        { 0, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_TRIGGER,     "Trigger" },
+        { 0, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_RELOAD,      "Reload" },
+        { 0, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_SCREEN_X,    "Gun X" },
+        { 0, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_SCREEN_Y,    "Gun Y" },
+        { 0, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_IS_OFFSCREEN,"Gun Offscreen" },
+        /* Mouse */
+        { 0, RETRO_DEVICE_MOUSE,    0, RETRO_DEVICE_ID_MOUSE_X,       "Mouse X" },
+        { 0, RETRO_DEVICE_MOUSE,    0, RETRO_DEVICE_ID_MOUSE_Y,       "Mouse Y" },
+        { 0, RETRO_DEVICE_MOUSE,    0, RETRO_DEVICE_ID_MOUSE_LEFT,    "Fire" },
+        { 0, RETRO_DEVICE_MOUSE,    0, RETRO_DEVICE_ID_MOUSE_RIGHT,   "Reload" },
+        { 0, RETRO_DEVICE_NONE, 0, 0, nullptr },
+    };
+    cb(RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS, (void *)input_desc);
 }
 
 void retro_set_video_refresh(retro_video_refresh_t cb)  { video_cb       = cb; }
@@ -624,6 +649,10 @@ void retro_get_system_av_info(struct retro_system_av_info *info)
 
 void retro_init(void)
 {
+    struct retro_log_callback log;
+    if (environ_cb && environ_cb(RETRO_ENVIRONMENT_GET_LOG_INTERFACE, &log))
+        log_cb = log.log;
+
     /* Create synchronisation primitives */
     s_frame_produced  = SDL_CreateSemaphore(0);
     s_frame_consumed  = SDL_CreateSemaphore(0);
@@ -1112,10 +1141,10 @@ void retro_unload_game(void)
     s_vid_w = 640; s_vid_h = 480;
     s_pad_state  = 0;
     s_pad_prev   = 0;
+    s_pad_synced = false;
     s_mouse_x = s_mouse_y = 0;
     s_mouse_dx = s_mouse_dy = 0;
     s_mouse_moved = false;
-    s_mouse_btns = s_mouse_prev = 0;
     SDL_AtomicSet(&s_geometry_changed, 0);
     if (s_audio_mutex) {
         SDL_LockMutex(s_audio_mutex);
@@ -1162,58 +1191,67 @@ void retro_run(void)
      * ---------------------------------------------------------------- */
     input_poll_cb();
 
+    /* Poll lightgun / mouse / pointer buttons BEFORE locking: route them into
+     * the joypad state word so they go through the same transition-detection
+     * path as regular pad buttons and are never silently dropped. */
+    bool lgt = (bool)input_state_cb(0, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_TRIGGER);
+    bool lgr = (bool)input_state_cb(0, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_RELOAD);
+    bool lgo = (bool)input_state_cb(0, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_IS_OFFSCREEN);
+    bool mbl = (bool)input_state_cb(0, RETRO_DEVICE_MOUSE,    0, RETRO_DEVICE_ID_MOUSE_LEFT);
+    bool mbr = (bool)input_state_cb(0, RETRO_DEVICE_MOUSE,    0, RETRO_DEVICE_ID_MOUSE_RIGHT);
+
     uint32_t new_state = 0;
     for (int i = 0; i < k_btn_map_size; ++i) {
         if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, k_btn_map[i].retro_id))
             new_state |= (1u << k_btn_map[i].hypseus_id);
     }
+    /* Merge pointing-device fire buttons into the joypad word.
+     * Mapping must match standalone mouse_buttons_map (io/input.cpp):
+     *   left  click (SDL index 1) → SWITCH_BUTTON3
+     *   right click (SDL index 3) → SWITCH_BUTTON1
+     * POINTER_PRESSED (pp) is excluded: RetroArch reports it as permanently
+     * active when the cursor is inside the game window. */
+    if (lgt || mbl)              new_state |= (1u << SWITCH_BUTTON3);
+    if (lgr || mbr || (lgt && lgo)) new_state |= (1u << SWITCH_BUTTON1);
 
     SDL_LockMutex(s_input_mutex);
     s_pad_state = new_state;
 
-    /* Poll mouse/pointer/lightgun only for games that use pointing devices.
-     * Unconditional polling is expensive on the udev driver (aarch64). */
+    /* Position tracking — only for games that use pointing devices */
     if (g_game && g_game->get_mouse_enabled()) {
-        Sint16 mdx = (Sint16)input_state_cb(0, RETRO_DEVICE_MOUSE,   0, RETRO_DEVICE_ID_MOUSE_X);
-        Sint16 mdy = (Sint16)input_state_cb(0, RETRO_DEVICE_MOUSE,   0, RETRO_DEVICE_ID_MOUSE_Y);
-        bool   mbl = (bool)  input_state_cb(0, RETRO_DEVICE_MOUSE,   0, RETRO_DEVICE_ID_MOUSE_LEFT);
-        bool   mbr = (bool)  input_state_cb(0, RETRO_DEVICE_MOUSE,   0, RETRO_DEVICE_ID_MOUSE_RIGHT);
-
-        int16_t px = (int16_t)input_state_cb(0, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_X);
-        int16_t py = (int16_t)input_state_cb(0, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_Y);
-        bool    pp = (bool)   input_state_cb(0, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_PRESSED);
-
+        Sint16  mdx = (Sint16) input_state_cb(0, RETRO_DEVICE_MOUSE,    0, RETRO_DEVICE_ID_MOUSE_X);
+        Sint16  mdy = (Sint16) input_state_cb(0, RETRO_DEVICE_MOUSE,    0, RETRO_DEVICE_ID_MOUSE_Y);
         int16_t lgx = (int16_t)input_state_cb(0, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_SCREEN_X);
         int16_t lgy = (int16_t)input_state_cb(0, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_SCREEN_Y);
-        bool    lgt = (bool)   input_state_cb(0, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_TRIGGER);
-        bool    lgo = (bool)   input_state_cb(0, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_IS_OFFSCREEN);
+        int16_t px  = (int16_t)input_state_cb(0, RETRO_DEVICE_POINTER,  0, RETRO_DEVICE_ID_POINTER_X);
+        int16_t py  = (int16_t)input_state_cb(0, RETRO_DEVICE_POINTER,  0, RETRO_DEVICE_ID_POINTER_Y);
 
         bool moved = false;
-        if (lgt && !lgo) {
+        if (!lgo) {
+            /* Lightgun on screen: absolute coordinates */
             int nx = std::max(0, std::min(s_vid_w - 1, (int)((lgx + 32767) * s_vid_w / 65534)));
             int ny = std::max(0, std::min(s_vid_h - 1, (int)((lgy + 32767) * s_vid_h / 65534)));
             if (nx != s_mouse_x || ny != s_mouse_y) {
                 s_mouse_dx = (Sint16)(nx - s_mouse_x); s_mouse_dy = (Sint16)(ny - s_mouse_y);
                 s_mouse_x = nx; s_mouse_y = ny; moved = true;
             }
-        } else if (pp) {
+        } else if (mdx || mdy) {
+            /* Relative mouse */
+            s_mouse_dx = mdx; s_mouse_dy = mdy;
+            s_mouse_x = std::max(0, std::min(s_vid_w - 1, s_mouse_x + mdx));
+            s_mouse_y = std::max(0, std::min(s_vid_h - 1, s_mouse_y + mdy));
+            moved = true;
+        }
+        /* Pointer absolute — continuous tracking (touchscreen / mouse-as-pointer) */
+        if (!moved && (px || py)) {
             int nx = std::max(0, std::min(s_vid_w - 1, (int)((px + 32767) * s_vid_w / 65534)));
             int ny = std::max(0, std::min(s_vid_h - 1, (int)((py + 32767) * s_vid_h / 65534)));
             if (nx != s_mouse_x || ny != s_mouse_y) {
                 s_mouse_dx = (Sint16)(nx - s_mouse_x); s_mouse_dy = (Sint16)(ny - s_mouse_y);
                 s_mouse_x = nx; s_mouse_y = ny; moved = true;
             }
-        } else if (mdx || mdy) {
-            s_mouse_dx = mdx; s_mouse_dy = mdy;
-            s_mouse_x = std::max(0, std::min(s_vid_w - 1, s_mouse_x + mdx));
-            s_mouse_y = std::max(0, std::min(s_vid_h - 1, s_mouse_y + mdy));
-            moved = true;
         }
         s_mouse_moved = moved;
-        uint8_t btns = 0;
-        if (mbl || pp || (lgt && !lgo)) btns |= 1;
-        if (mbr)                        btns |= 2;
-        s_mouse_btns = btns;
     }
 
     SDL_UnlockMutex(s_input_mutex);
