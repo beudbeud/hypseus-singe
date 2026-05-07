@@ -253,6 +253,13 @@ static struct retro_core_option_v2_definition k_option_defs[] = {
         { {"enabled", nullptr}, {"disabled", nullptr}, {nullptr, nullptr} },
         "enabled"
     },
+    {
+        "hypseus_crosshair",
+        "Crosshair (Singe games)",
+        nullptr, nullptr, nullptr, nullptr,
+        { {"enabled", nullptr}, {"disabled", nullptr}, {nullptr, nullptr} },
+        "enabled"
+    },
     { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, {{nullptr, nullptr}}, nullptr },
 };
 
@@ -288,28 +295,22 @@ static const int k_btn_map_size = (int)(sizeof(k_btn_map) / sizeof(k_btn_map[0])
  * ====================================================================== */
 
 /*
- * Called from vid_blit() (video/video.cpp, guarded by LIBRETRO_CORE) after
- * SDL_RenderPresent().  Reads pixels from the renderer, stores them in the
- * shared buffer, signals the libretro thread, then waits for it to consume
- * the frame before returning.
+ * Called from vid_blit() (video/video.cpp, LIBRETRO_CORE path) after the
+ * YUV→ARGB conversion and overlay compositing are done into g_lr_surface.
+ * Signals the libretro thread that a frame is ready, then waits for it to
+ * consume the frame before returning so the emu thread can reuse the surface.
  */
 void libretro_submit_video()
 {
     if (!s_frame_produced || !s_frame_consumed || !video_cb)
         return;
 
-    /* Use viewport (renderer) dimensions, not g_vid_width: the renderer may
-     * be resized to probe_width×probe_height (e.g. 720×480) while g_vid_width
-     * stays at the cmdline default (640).  Reading more pixels than the buffer
-     * is sized for causes a heap overflow. */
+    /* Use probe dimensions (viewport), not g_vid_width (cmdline default). */
     int w = (int)video::get_viewport_width();
     int h = (int)video::get_viewport_height();
     if (w <= 0) w = (int)video::get_video_width();
     if (h <= 0) h = (int)video::get_video_height();
 
-    /* Update stored dimensions; notify frontend of geometry change if needed.
-     * Pixel data stays in g_lr_surface — retro_run() reads it directly while
-     * the emu thread is blocked on s_frame_consumed (guaranteed exclusion). */
     if (w != s_vid_w || h != s_vid_h) {
         s_vid_w = w;
         s_vid_h = h;
@@ -786,6 +787,23 @@ bool retro_load_game(const struct retro_game_info *info)
     if (!loaded_commands && path_ext != ".zip" && path_ext != ".zlua")
         loaded_commands = parse_commands_file(dir_path.c_str(), str_args);
 
+    /* A .commands file that starts with a flag (e.g. "-bank 0 01000100") rather
+     * than a game name is treated as extra-args mode: the core auto-generates
+     * the base arguments and appends the file's flags at the end.  This lets
+     * users write minimal .commands files with only game-specific options. */
+    bool extra_args_mode = loaded_commands
+                           && str_args.size() >= 2
+                           && !str_args[1].empty()
+                           && str_args[1][0] == '-';
+
+    std::vector<std::string> extra_args;
+    if (extra_args_mode) {
+        /* Save the extra flags (skip the "hypseus" sentinel at index 0). */
+        extra_args.assign(str_args.begin() + 1, str_args.end());
+        loaded_commands = false; /* fall through to auto-generation */
+        str_args.clear();
+    }
+
     if (!loaded_commands)
     {
         /* Auto-generate from detected content */
@@ -825,6 +843,9 @@ bool retro_load_game(const struct retro_game_info *info)
             str_args.push_back("vldp");
             str_args.push_back("-framefile"); str_args.push_back(framefile);
         }
+
+        /* Append extra flags from the .commands file (extra-args mode). */
+        str_args.insert(str_args.end(), extra_args.begin(), extra_args.end());
     }
 
     /* Inject -homedir unless already present */
@@ -871,12 +892,21 @@ bool retro_load_game(const struct retro_game_info *info)
     }
 
     /* ------------------------------------------------------------------ */
-    /* 3b. Apply core options (inject args not already present)           */
+    /* 3b. Sync core option defaults from .commands, then apply options   */
+    /*                                                                     */
+    /* Boolean options recognised in the .commands file are extracted and  */
+    /* removed from str_args so that the core option is always the final   */
+    /* authority.  The frontend option menu is re-registered with updated  */
+    /* defaults so that the .commands file state is visible to the user    */
+    /* (and the user can override it without editing the file).            */
     /* ------------------------------------------------------------------ */
     {
-        auto has_arg = [&](const char *a) -> bool {
-            for (auto &s : str_args) if (s == a) return true;
-            return false;
+        /* Remove arg from str_args; return true if it was present. */
+        auto pull_arg = [&](const char *a) -> bool {
+            auto it = std::find(str_args.begin(), str_args.end(), std::string(a));
+            if (it == str_args.end()) return false;
+            str_args.erase(it);
+            return true;
         };
         auto getcore = [&](const char *key) -> const char * {
             struct retro_variable v = { key, nullptr };
@@ -884,20 +914,44 @@ bool retro_load_game(const struct retro_game_info *info)
             return v.value ? v.value : "";
         };
 
-        if (!has_arg("-fastboot") && strcmp(getcore("hypseus_fastboot"), "enabled") == 0)
-            str_args.push_back("-fastboot");
+        /* Detect and remove managed boolean args (core option wins). */
+        bool cmd_fastboot       = pull_arg("-fastboot");
+        bool cmd_blank_searches = pull_arg("-blank_searches");
+        bool cmd_blank_skips    = pull_arg("-blank_skips");
+        bool cmd_cheat          = pull_arg("-cheat");
+        bool cmd_nocrosshair    = pull_arg("-nocrosshair");
 
-        if (!has_arg("-blank_searches") && strcmp(getcore("hypseus_blank_searches"), "enabled") == 0)
-            str_args.push_back("-blank_searches");
+        /* Re-register options with defaults derived from the .commands file
+         * so the frontend menu reflects the file's intent.  The user's
+         * explicit overrides (if any) are preserved by the frontend. */
+        {
+            auto n = sizeof(k_option_defs) / sizeof(k_option_defs[0]);
+            std::vector<retro_core_option_v2_definition> dyn(k_option_defs,
+                                                              k_option_defs + n);
+            auto set_def = [&](const char *key, const char *val) {
+                for (auto &d : dyn)
+                    if (d.key && strcmp(d.key, key) == 0) { d.default_value = val; break; }
+            };
+            if (cmd_fastboot)       set_def("hypseus_fastboot",       "enabled");
+            if (cmd_blank_searches) set_def("hypseus_blank_searches", "enabled");
+            if (cmd_blank_skips)    set_def("hypseus_blank_skips",    "enabled");
+            if (cmd_cheat)          set_def("hypseus_cheat",          "enabled");
+            if (cmd_nocrosshair)    set_def("hypseus_crosshair",      "disabled");
 
-        if (!has_arg("-blank_skips") && strcmp(getcore("hypseus_blank_skips"), "enabled") == 0)
-            str_args.push_back("-blank_skips");
+            struct retro_core_options_v2 dyn_opts = { nullptr, dyn.data() };
+            environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2, &dyn_opts);
+        }
 
-        if (!has_arg("-cheat") && strcmp(getcore("hypseus_cheat"), "enabled") == 0)
-            str_args.push_back("-cheat");
+        /* Apply current option values (user override or updated default). */
+        if (strcmp(getcore("hypseus_fastboot"),       "enabled")  == 0) str_args.push_back("-fastboot");
+        if (strcmp(getcore("hypseus_blank_searches"), "enabled")  == 0) str_args.push_back("-blank_searches");
+        if (strcmp(getcore("hypseus_blank_skips"),    "enabled")  == 0) str_args.push_back("-blank_skips");
+        if (strcmp(getcore("hypseus_cheat"),          "enabled")  == 0) str_args.push_back("-cheat");
+        if (strcmp(getcore("hypseus_crosshair"),      "disabled") == 0) str_args.push_back("-nocrosshair");
 
         {
             const char *v = getcore("hypseus_seek_frames");
+            auto has_arg = [&](const char *a) { return std::find(str_args.begin(), str_args.end(), std::string(a)) != str_args.end(); };
             if (!has_arg("-seek_frames_per_ms") && v[0] && strcmp(v, "0") != 0) {
                 str_args.push_back("-seek_frames_per_ms");
                 str_args.push_back(std::string(v));
@@ -905,6 +959,7 @@ bool retro_load_game(const struct retro_game_info *info)
         }
         {
             const char *v = getcore("hypseus_latency");
+            auto has_arg = [&](const char *a) { return std::find(str_args.begin(), str_args.end(), std::string(a)) != str_args.end(); };
             if (!has_arg("-latency") && v[0] && strcmp(v, "0") != 0) {
                 str_args.push_back("-latency");
                 str_args.push_back(std::string(v));
@@ -1285,11 +1340,8 @@ void retro_run(void)
          * thread) so no locking is needed. */
         SDL_Surface *lr = video::get_lr_surface();
         if (lr && lr->pixels) {
-            /* Use lr->w/h (actual surface dimensions) rather than s_vid_w/h.
-             * After game::resize() recreates g_lr_surface at a new size (e.g.
-             * when probe_width changes to the real MPEG width), s_vid_w may
-             * still hold the old value for one frame, causing pitch < w*4 and
-             * visible horizontal tiling in the frontend. */
+            /* Use lr->w/h rather than s_vid_w/h: game::resize() may have
+             * recreated g_lr_surface before s_vid_w was updated. */
             unsigned lrw = (unsigned)lr->w;
             unsigned lrh = (unsigned)lr->h;
             if ((int)lrw != s_vid_w || (int)lrh != s_vid_h) {
