@@ -2490,18 +2490,15 @@ void vid_blit()
     // and is recommended by SDL_Rendercopy() documentation.
 
 #ifndef LIBRETRO_CORE
-    /* In libretro, g_lr_surface is fully overwritten by the YUV→RGB conversion
-     * below (or retains the previous frame when needs_update is false).
-     * SDL_RenderClear would redundantly memset 1.2 MB to black every frame. */
     SDL_RenderClear(g_renderer);
 #endif
 
     // Does YUV texture need update from the YUV "surface"?
     // Don't try if the vldp object didn't call setup_yuv_surface (in noldp mode)
 #ifdef LIBRETRO_CORE
-    /* SDL software renderer YUV blit is broken on V3D/Mesa (black output).
-     * Convert YUV→ARGB8888 manually; g_lr_surface is ARGB8888 (not XRGB8888)
-     * so the overlay alpha compositing below correctly skips transparent pixels. */
+    /* Convert YUV→ARGB8888 manually: SDL software renderer YUV blit is broken
+     * on V3D/Mesa (black output). g_lr_surface is ARGB8888 so alpha compositing
+     * below correctly skips transparent overlay pixels. */
     if (g_yuv_lifecycle_mutex) SDL_LockMutex(g_yuv_lifecycle_mutex);
     if (g_yuv_surface && g_lr_surface) {
         SDL_LockMutex(g_yuv_surface->mutex);
@@ -2509,13 +2506,6 @@ void vid_blit()
             g_yuv_video_needs_update = false;
 
             int bw = g_yuv_surface->width, bh = g_yuv_surface->height;
-
-            static bool s_dim_logged = false;
-            if (!s_dim_logged) {
-                s_dim_logged = true;
-                fprintf(stderr, "[hypseus-libretro] YUV bw=%d bh=%d lr_w=%d lr_h=%d lr_pitch=%d\n",
-                        bw, bh, g_lr_surface->w, g_lr_surface->h, g_lr_surface->pitch);
-            }
 
             if (g_yuv_skip) {
                 if (g_yuv_display == YUV_VISIBLE) g_yuv_skip = false;
@@ -2529,13 +2519,10 @@ void vid_blit()
                     memset(g_lr_surface->pixels, 0, frame_bytes);
                 }
             } else {
-                /* Pack the three separate YUV planes into contiguous YV12
-                 * (Y | V | U), convert to ARGB into a scratch buffer sized to
-                 * the YUV dimensions, then nearest-neighbour scale into
-                 * g_lr_surface at g_scaling_rect.  Writing ARGB directly into
-                 * g_lr_surface->pixels with bw != surface width caused row
-                 * overflow (visible as horizontal tiling) when MPEG dims
-                 * differ from the libretro viewport. */
+                /* Pack separate Y/V/U planes into contiguous YV12 for
+                 * SDL_ConvertPixels, convert to a scratch ARGB buffer sized
+                 * to the YUV dims, then nearest-neighbour scale into
+                 * g_lr_surface at g_scaling_rect. */
                 int uv_sz = (bw / 2) * (bh / 2);
                 int pneed  = bw * bh + 2 * uv_sz;
                 if (pneed > g_yuv_packed_size) {
@@ -2557,11 +2544,9 @@ void vid_blit()
                     SDL_PIXELFORMAT_YV12,     g_yuv_packed_buf, bw,
                     SDL_PIXELFORMAT_ARGB8888, g_yuv_argb_buf,   bw * 4);
 
-                /* Nearest-neighbour scale YUV into g_lr_surface at g_scaling_rect.
-                 * Do NOT clear the surface: the overlay from the previous frame
-                 * persists in g_lr_surface and is only redrawn when
-                 * g_overlay_needs_update is set. Clearing here would erase
-                 * overlay text on frames where the overlay has not changed. */
+                /* Nearest-neighbour scale into g_lr_surface at g_scaling_rect.
+                 * Do not clear the surface — the overlay is composited on top
+                 * every frame and must survive across YUV updates. */
                 uint32_t *dst     = (uint32_t *)g_lr_surface->pixels;
                 int       dst_str = g_lr_surface->pitch / 4;
                 int       vw      = g_lr_surface->w;
@@ -2586,7 +2571,6 @@ void vid_blit()
                 }
             }
         }
-        /* When needs_update is false, g_lr_surface already holds the last frame. */
         SDL_UnlockMutex(g_yuv_surface->mutex);
     }
     if (g_yuv_lifecycle_mutex) SDL_UnlockMutex(g_yuv_lifecycle_mutex);
@@ -2644,8 +2628,8 @@ void vid_blit()
     if (g_overlay_texture)
         SDL_RenderCopy(g_renderer, g_overlay_texture, &g_render_size_rect, &g_scaling_rect);
 #else
-    /* Composite overlay surfaces onto g_lr_surface (scale+blend).
-     * src=RGBA8888 (A=low byte), dst=ARGB8888 (A=high byte). */
+    /* Composite overlay surfaces onto g_lr_surface.
+     * Overlay src is RGBA8888 (A=low byte); dst is ARGB8888 (A=high byte). */
     if (g_lr_surface) {
         uint32_t *dst       = (uint32_t *)g_lr_surface->pixels;
         int       dst_str   = g_lr_surface->pitch / 4;
@@ -2702,25 +2686,14 @@ void vid_blit()
             }
         };
 
-        /* Composite scoreboard every frame: g_blit_surface persists its content
-         * between frames (unlike the standalone scoreboard window which redraws
-         * itself). g_blit_surface is initialised to fully-transparent so
-         * compositing it when empty is a no-op. Include ROM games (e.g. Space
-         * Ace) whose overlay scoreboard writes here without g_sb_renderer. */
+        /* Scoreboard: g_blit_surface is fully-transparent when empty → no-op. */
         if (g_lr_scoreboard_visible && g_blit_surface)
             composite_src(g_blit_surface, &g_blit_size_rect);
 
-        /* Always composite the overlay (not just when g_overlay_needs_update):
-         * the YUV scaling loop overwrites the entire g_scaling_rect area each
-         * frame, so the overlay must be redrawn on top every frame regardless
-         * of whether it changed.  g_overlay_blitter is fully transparent when
-         * empty so this is a no-op when there is nothing to show.
-         *
-         * Use g_overlay_blitter dimensions for the src rect instead of
-         * g_render_size_rect: the default render rect is 320×240 (blit_size)
-         * but the overlay blitter may be narrower (e.g. 256×240 for Mach3),
-         * causing an out-of-bounds read and wrong scaling.  Preserve the y
-         * offset from g_render_size_rect for games that use set_overlay_offset. */
+        /* Overlay: always composite every frame (YUV scaling overwrites
+         * g_scaling_rect each frame).  Use g_overlay_blitter dimensions for
+         * the src rect — g_render_size_rect.w defaults to 320 but the blitter
+         * may be narrower (e.g. 256 for Mach3). Preserve y for set_overlay_offset. */
         if (g_overlay_blitter) {
             SDL_Rect overlay_src = {
                 0,
