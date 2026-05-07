@@ -229,8 +229,10 @@ enum retro_log_level {
     RETRO_LOG_DUMMY = INT32_MAX
 };
 
+typedef void (*retro_log_printf_t)(enum retro_log_level level, const char *fmt, ...);
+
 struct retro_log_callback {
-    void (*log)(enum retro_log_level level, const char *fmt, ...);
+    retro_log_printf_t log;
 };
 
 /* -------------------------------------------------------------------------

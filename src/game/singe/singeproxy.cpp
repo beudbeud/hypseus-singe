@@ -587,12 +587,6 @@ void sep_do_mouse_move(Uint16 x, Uint16 y, Sint16 xrel, Sint16 yrel, Sint8 mouse
     int mID = (int) mouseID;
     int8_t rID = mID;
 	
-    // Not sure what's wrong here.  I think things are getting started before Singe is ready.
-    if (!debounced) {
-        debounced = true;
-        return;
-    }
-	
     x1 *= g_se_overlay_scale_x;
     y1 *= g_se_overlay_scale_y;
     xr *= g_se_overlay_scale_x;
@@ -601,7 +595,15 @@ void sep_do_mouse_move(Uint16 x, Uint16 y, Sint16 xrel, Sint16 yrel, Sint8 mouse
     if (mID < 0) rID += 1; // SDL_MOUSE
     g_tract.mouseX[rID] = x1;
     g_tract.mouseY[rID] = y1;
-	
+
+    /* Skip the Lua callback on the very first call — Singe may not be fully
+     * ready yet — but always update the position so mouseGetPosition() works
+     * correctly from the first shot. */
+    if (!debounced) {
+        debounced = true;
+        return;
+    }
+
     sep_call_lua("onMouseMoved", "iiiii", x1, y1, xr, yr, mID);
 }
 
