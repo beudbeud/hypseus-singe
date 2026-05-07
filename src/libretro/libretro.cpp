@@ -1285,7 +1285,19 @@ void retro_run(void)
          * thread) so no locking is needed. */
         SDL_Surface *lr = video::get_lr_surface();
         if (lr && lr->pixels) {
-            size_t frame_sz = (size_t)lr->pitch * (size_t)lr->h;
+            /* Use lr->w/h (actual surface dimensions) rather than s_vid_w/h.
+             * After game::resize() recreates g_lr_surface at a new size (e.g.
+             * when probe_width changes to the real MPEG width), s_vid_w may
+             * still hold the old value for one frame, causing pitch < w*4 and
+             * visible horizontal tiling in the frontend. */
+            unsigned lrw = (unsigned)lr->w;
+            unsigned lrh = (unsigned)lr->h;
+            if ((int)lrw != s_vid_w || (int)lrh != s_vid_h) {
+                s_vid_w = (int)lrw;
+                s_vid_h = (int)lrh;
+                SDL_AtomicSet(&s_geometry_changed, 1);
+            }
+            size_t frame_sz = (size_t)lr->pitch * (size_t)lrh;
             if (frame_sz > s_video_buf_sz) {
                 delete[] s_video_buf;
                 s_video_buf    = new uint32_t[(frame_sz + 3) / 4];
@@ -1293,7 +1305,7 @@ void retro_run(void)
             }
             memcpy(s_video_buf, lr->pixels, frame_sz);
             SDL_SemPost(s_frame_consumed);
-            video_cb(s_video_buf, (unsigned)s_vid_w, (unsigned)s_vid_h, (size_t)lr->pitch);
+            video_cb(s_video_buf, lrw, lrh, (size_t)lr->pitch);
         } else {
             SDL_SemPost(s_frame_consumed);
             video_cb(NULL, (unsigned)s_vid_w, (unsigned)s_vid_h, 0);

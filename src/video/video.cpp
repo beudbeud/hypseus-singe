@@ -91,6 +91,8 @@ static SDL_Surface *g_blit_surface       = NULL;    /* 320x240 software scoreboa
 static SDL_Mutex   *g_yuv_lifecycle_mutex = NULL;
 static uint8_t     *g_yuv_packed_buf        = nullptr; /* contiguous YV12 input for SDL_ConvertPixels */
 static int          g_yuv_packed_size       = 0;
+static uint32_t    *g_yuv_argb_buf          = nullptr; /* YUV→ARGB scratch (sized to YUV dims) */
+static int          g_yuv_argb_size         = 0;       /* in pixels */
 static bool         g_lr_scoreboard_visible = true;
 static void       (*g_frame_ready_hook)()   = nullptr;
 #endif
@@ -976,6 +978,7 @@ bool deinit_display()
     if (g_lr_surface)          { SDL_DestroySurface(g_lr_surface);        g_lr_surface          = NULL; }
     if (g_yuv_lifecycle_mutex) { SDL_DestroyMutex(g_yuv_lifecycle_mutex); g_yuv_lifecycle_mutex = NULL; }
     delete[] g_yuv_packed_buf; g_yuv_packed_buf = nullptr; g_yuv_packed_size = 0;
+    delete[] g_yuv_argb_buf;   g_yuv_argb_buf   = nullptr; g_yuv_argb_size   = 0;
 #endif
 
     return (true);
@@ -2605,6 +2608,13 @@ void vid_blit()
 
             int bw = g_yuv_surface->width, bh = g_yuv_surface->height;
 
+            static bool s_dim_logged = false;
+            if (!s_dim_logged) {
+                s_dim_logged = true;
+                fprintf(stderr, "[hypseus-libretro] YUV bw=%d bh=%d lr_w=%d lr_h=%d lr_pitch=%d\n",
+                        bw, bh, g_lr_surface->w, g_lr_surface->h, g_lr_surface->pitch);
+            }
+
             if (g_yuv_skip) {
                 if (g_yuv_display == YUV_VISIBLE) g_yuv_skip = false;
                 /* Write blank colour directly into the render surface. */
@@ -2618,8 +2628,12 @@ void vid_blit()
                 }
             } else {
                 /* Pack the three separate YUV planes into contiguous YV12
-                 * (Y | V | U) then SDL_ConvertPixels directly into g_lr_surface,
-                 * skipping the intermediate g_rgb_frame_buf copy. */
+                 * (Y | V | U), convert to ARGB into a scratch buffer sized to
+                 * the YUV dimensions, then nearest-neighbour scale into
+                 * g_lr_surface at g_scaling_rect.  Writing ARGB directly into
+                 * g_lr_surface->pixels with bw != surface width caused row
+                 * overflow (visible as horizontal tiling) when MPEG dims
+                 * differ from the libretro viewport. */
                 int uv_sz = (bw / 2) * (bh / 2);
                 int pneed  = bw * bh + 2 * uv_sz;
                 if (pneed > g_yuv_packed_size) {
@@ -2631,9 +2645,43 @@ void vid_blit()
                 memcpy(g_yuv_packed_buf + bw * bh,         g_yuv_surface->Vplane, (size_t)uv_sz);
                 memcpy(g_yuv_packed_buf + bw * bh + uv_sz, g_yuv_surface->Uplane, (size_t)uv_sz);
 
+                int argb_need = bw * bh;
+                if (argb_need > g_yuv_argb_size) {
+                    delete[] g_yuv_argb_buf;
+                    g_yuv_argb_buf  = new uint32_t[argb_need];
+                    g_yuv_argb_size = argb_need;
+                }
                 SDL_ConvertPixels(bw, bh,
-                    SDL_PIXELFORMAT_YV12,     g_yuv_packed_buf,     bw,
-                    SDL_PIXELFORMAT_ARGB8888, g_lr_surface->pixels, g_lr_surface->pitch);
+                    SDL_PIXELFORMAT_YV12,     g_yuv_packed_buf, bw,
+                    SDL_PIXELFORMAT_ARGB8888, g_yuv_argb_buf,   bw * 4);
+
+                /* Nearest-neighbour scale YUV into g_lr_surface at g_scaling_rect.
+                 * Do NOT clear the surface: the overlay from the previous frame
+                 * persists in g_lr_surface and is only redrawn when
+                 * g_overlay_needs_update is set. Clearing here would erase
+                 * overlay text on frames where the overlay has not changed. */
+                uint32_t *dst     = (uint32_t *)g_lr_surface->pixels;
+                int       dst_str = g_lr_surface->pitch / 4;
+                int       vw      = g_lr_surface->w;
+                int       vh      = g_lr_surface->h;
+
+                int dx0 = g_scaling_rect.x, dy0 = g_scaling_rect.y;
+                int dw  = g_scaling_rect.w, dh  = g_scaling_rect.h;
+                if (dw <= 0 || dh <= 0) { dx0 = 0; dy0 = 0; dw = vw; dh = vh; }
+
+                int dx_start = std::max(0, -dx0);
+                int dx_end   = std::min(dw, vw - dx0);
+                int dy_start = std::max(0, -dy0);
+                int dy_end   = std::min(dh, vh - dy0);
+                for (int dy = dy_start; dy < dy_end; ++dy) {
+                    int sy = (dy * bh) / dh;
+                    const uint32_t *row_src = &g_yuv_argb_buf[sy * bw];
+                    uint32_t       *row_dst = &dst[(dy0 + dy) * dst_str + dx0];
+                    for (int dx = dx_start; dx < dx_end; ++dx) {
+                        int sx = (dx * bw) / dw;
+                        row_dst[dx] = row_src[sx];
+                    }
+                }
             }
         }
         /* When needs_update is false, g_lr_surface already holds the last frame. */
@@ -2756,8 +2804,26 @@ void vid_blit()
          * Ace) whose overlay scoreboard writes here without g_sb_renderer. */
         if (g_lr_scoreboard_visible && g_blit_surface)
             composite_src(g_blit_surface, &g_local_size_rect);
-        if (g_overlay_surface)
-            composite_src(g_overlay_surface, &g_limit_rect);
+
+        /* Always composite the overlay (not just when it changed): the YUV
+         * scaling loop overwrites the entire g_scaling_rect area each frame,
+         * so the overlay must be redrawn on top every frame regardless of
+         * whether it changed.  g_overlay_surface is fully transparent when
+         * empty so this is a no-op when there is nothing to show.
+         *
+         * Use g_overlay_surface dimensions for the src rect instead of a fixed
+         * 320×240 rect: the overlay may be narrower (e.g. 256×240 for Mach3),
+         * causing an out-of-bounds read and wrong scaling.  Preserve the y
+         * offset from g_limit_rect for games that use set_overlay_offset. */
+        if (g_overlay_surface) {
+            SDL_Rect overlay_src = {
+                0,
+                g_limit_rect.y,
+                g_overlay_surface->w,
+                g_overlay_surface->h - g_limit_rect.y
+            };
+            composite_src(g_overlay_surface, &overlay_src);
+        }
     }
 #endif
 
