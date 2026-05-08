@@ -50,11 +50,13 @@ jobs:
         cmake ../src -DLIBRETRO=ON
         make hypseus_singe_libretro
 
+    - name: Rename artifact
+      run: cp build/hypseus_singe_libretro.so hypseus_singe_libretro-linux-${{ matrix.arch }}.so
+
     - name: Upload release asset
       uses: softprops/action-gh-release@v2
       with:
-        files: build/hypseus_singe_libretro.so
-        asset_name: hypseus_singe_libretro-linux-${{ matrix.arch }}.so
+        files: hypseus_singe_libretro-linux-${{ matrix.arch }}.so
 
   build-macos:
     runs-on: macos-latest
