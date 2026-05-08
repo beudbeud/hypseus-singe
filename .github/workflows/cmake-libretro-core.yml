@@ -1,0 +1,61 @@
+name: CMake-Libretro-Core
+
+on:
+  release:
+    types: [published]
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+            cmake_extra: ""
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            cmake_extra: ""
+
+    runs-on: ${{ matrix.runner }}
+    name: Build libretro core (${{ matrix.arch }})
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y \
+          gcc \
+          libogg-dev \
+          libsdl2-dev \
+          libsdl2-ttf-dev \
+          libsdl2-image-dev \
+          libsdl2-mixer-dev \
+          libzip-dev \
+          libvorbis-dev \
+          zlib1g-dev \
+          autoconf \
+          automake \
+          libtool
+
+    - name: Build
+      run: |
+        mkdir build
+        cd build
+        cmake ../src -DLIBRETRO=ON ${{ matrix.cmake_extra }}
+        make hypseus_singe_libretro
+
+    - name: Create Distribution SHA
+      id: vars
+      run: |
+        ShortSHA=$(git rev-parse --short ${{ github.sha }})
+        echo "COMMIT_SHORT_SHA=$ShortSHA" >> $GITHUB_ENV
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: hypseus_singe_libretro-${{ matrix.arch }}-${{ env.COMMIT_SHORT_SHA }}
+        path: build/hypseus_singe_libretro.so
