@@ -65,6 +65,26 @@ Build:
     cmake ../src
     make
 
+### Libretro Core
+
+Build the libretro core shared library with the `LIBRETRO` CMake option:
+
+    mkdir build
+    cd build
+    cmake ../src -DLIBRETRO=ON
+    make
+
+This produces `hypseus_singe_libretro.so` (Linux) or `hypseus_singe_libretro.dll` (Windows).
+
+Copy the core to your RetroArch cores directory, then place the required assets in the RetroArch **system/bios** directory:
+
+    <system_dir>/pics/
+    <system_dir>/fonts/
+    <system_dir>/sound/
+
+The core probes for `pics/led0.bmp` inside `<system_dir>` to locate the asset root.  
+Game data (roms, vldp, singe) should live under `<system_dir>/hypseus/`.
+
 ## Install and Run
 
 Ensure you have data in the following `hypseus` HOME folders:
