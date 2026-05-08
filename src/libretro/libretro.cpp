@@ -708,7 +708,7 @@ bool retro_load_game(const struct retro_game_info *info)
      * Injected as -datadir so hypseus chdir()s there, making ALL relative
      * asset paths (pics/, bezels/, …) resolve correctly. */
     std::vector<std::string> datadir_candidates = {
-        std::string(sys_dir) + "/hypseus",
+        std::string(sys_dir),
         "/usr/share/hypseus",
         parent_dir,
     };
