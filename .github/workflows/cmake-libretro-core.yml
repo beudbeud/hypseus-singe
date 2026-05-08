@@ -49,13 +49,11 @@ jobs:
         cmake ../src -DLIBRETRO=ON ${{ matrix.cmake_extra }}
         make hypseus_singe_libretro
 
-    - name: Create Distribution SHA
-      id: vars
+    - name: Rename artifact
       run: |
-        ShortSHA=$(git rev-parse --short ${{ github.sha }})
-        echo "COMMIT_SHORT_SHA=$ShortSHA" >> $GITHUB_ENV
+        cp build/hypseus_singe_libretro.so hypseus_singe_libretro-${{ matrix.arch }}.so
 
-    - uses: actions/upload-artifact@v4
+    - name: Upload release asset
+      uses: softprops/action-gh-release@v2
       with:
-        name: hypseus_singe_libretro-${{ matrix.arch }}-${{ env.COMMIT_SHORT_SHA }}
-        path: build/hypseus_singe_libretro.so
+        files: hypseus_singe_libretro-${{ matrix.arch }}.so
