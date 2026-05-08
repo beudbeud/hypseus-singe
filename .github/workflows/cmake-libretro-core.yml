@@ -11,19 +11,17 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  build-linux:
     strategy:
       matrix:
         include:
           - arch: amd64
             runner: ubuntu-latest
-            cmake_extra: ""
           - arch: arm64
             runner: ubuntu-24.04-arm
-            cmake_extra: ""
 
     runs-on: ${{ matrix.runner }}
-    name: Build libretro core (${{ matrix.arch }})
+    name: Build libretro core (linux-${{ matrix.arch }})
 
     steps:
     - uses: actions/checkout@v4
@@ -49,14 +47,47 @@ jobs:
       run: |
         mkdir build
         cd build
-        cmake ../src -DLIBRETRO=ON ${{ matrix.cmake_extra }}
+        cmake ../src -DLIBRETRO=ON
         make hypseus_singe_libretro
-
-    - name: Rename artifact
-      run: |
-        cp build/hypseus_singe_libretro.so hypseus_singe_libretro-${{ matrix.arch }}.so
 
     - name: Upload release asset
       uses: softprops/action-gh-release@v2
       with:
-        files: hypseus_singe_libretro-${{ matrix.arch }}.so
+        files: build/hypseus_singe_libretro.so
+        asset_name: hypseus_singe_libretro-linux-${{ matrix.arch }}.so
+
+  build-macos:
+    runs-on: macos-latest
+    name: Build libretro core (macOS)
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Dependencies
+      run: |
+        brew install \
+          cmake \
+          autoconf \
+          automake \
+          libtool \
+          pkg-config \
+          sdl2 \
+          sdl2_ttf \
+          sdl2_image \
+          sdl2_mixer \
+          libvorbis \
+          libogg \
+          libzip
+
+    - name: Build
+      run: |
+        mkdir build
+        cd build
+        cmake ../src -DLIBRETRO=ON
+        make hypseus_singe_libretro
+
+    - name: Upload release asset
+      uses: softprops/action-gh-release@v2
+      with:
+        files: build/hypseus_singe_libretro.dylib
+        asset_name: hypseus_singe_libretro-macOS.dylib
