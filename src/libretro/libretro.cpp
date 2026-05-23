@@ -260,6 +260,13 @@ static struct retro_core_option_v2_definition k_option_defs[] = {
         { {"enabled", nullptr}, {"disabled", nullptr}, {nullptr, nullptr} },
         "enabled"
     },
+    {
+        "hypseus_fullscreen",
+        "Force Fullscreen (ignore -x/-y)",
+        nullptr, nullptr, nullptr, nullptr,
+        { {"disabled", nullptr}, {"enabled", nullptr}, {nullptr, nullptr} },
+        "disabled"
+    },
     { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, {{nullptr, nullptr}}, nullptr },
 };
 
@@ -919,6 +926,7 @@ bool retro_load_game(const struct retro_game_info *info)
         bool cmd_blank_skips    = pull_arg("-blank_skips");
         bool cmd_cheat          = pull_arg("-cheat");
         bool cmd_nocrosshair    = pull_arg("-nocrosshair");
+        bool cmd_fullscreen     = pull_arg("-fullscreen") || pull_arg("-fullscreen_window");
 
         /* Re-register options with defaults derived from the .commands file
          * so the frontend menu reflects the file's intent.  The user's
@@ -936,6 +944,7 @@ bool retro_load_game(const struct retro_game_info *info)
             if (cmd_blank_skips)    set_def("hypseus_blank_skips",    "enabled");
             if (cmd_cheat)          set_def("hypseus_cheat",          "enabled");
             if (cmd_nocrosshair)    set_def("hypseus_crosshair",      "disabled");
+            if (cmd_fullscreen)     set_def("hypseus_fullscreen",     "enabled");
 
             struct retro_core_options_v2 dyn_opts = { nullptr, dyn.data() };
             environ_cb(RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2, &dyn_opts);
@@ -947,6 +956,20 @@ bool retro_load_game(const struct retro_game_info *info)
         if (strcmp(getcore("hypseus_blank_skips"),    "enabled")  == 0) str_args.push_back("-blank_skips");
         if (strcmp(getcore("hypseus_cheat"),          "enabled")  == 0) str_args.push_back("-cheat");
         if (strcmp(getcore("hypseus_crosshair"),      "disabled") == 0) str_args.push_back("-nocrosshair");
+
+        /* Force fullscreen: strip -x / -y from .commands and inject -fullscreen. */
+        if (strcmp(getcore("hypseus_fullscreen"), "enabled") == 0) {
+            auto strip_with_value = [&](const char *flag) {
+                auto it = std::find(str_args.begin(), str_args.end(), std::string(flag));
+                if (it != str_args.end()) {
+                    it = str_args.erase(it);
+                    if (it != str_args.end()) str_args.erase(it); /* remove the value too */
+                }
+            };
+            strip_with_value("-x");
+            strip_with_value("-y");
+            str_args.push_back("-fullscreen");
+        }
 
         {
             const char *v = getcore("hypseus_seek_frames");
