@@ -84,7 +84,6 @@ jobs:
         install: >-
           mingw-w64-x86_64-cmake
           mingw-w64-x86_64-gcc
-          mingw-w64-x86_64-ninja
           mingw-w64-x86_64-pkg-config
           mingw-w64-x86_64-SDL2
           mingw-w64-x86_64-SDL2_ttf
@@ -95,6 +94,7 @@ jobs:
           mingw-w64-x86_64-libzip
           mingw-w64-x86_64-zlib
           mingw-w64-x86_64-ccache
+          make
           autoconf
           automake
           libtool
@@ -109,10 +109,10 @@ jobs:
       run: |
         mkdir build
         cd build
-        cmake ../src -DLIBRETRO=ON -G Ninja \
+        cmake ../src -DLIBRETRO=ON -G "MSYS Makefiles" \
           -DCMAKE_C_COMPILER_LAUNCHER=ccache \
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-        cmake --build . --target hypseus_singe_libretro --parallel $(nproc)
+        make hypseus_singe_libretro -j$(nproc)
 
     - name: Rename artifact
       shell: msys2 {0}

@@ -47,6 +47,7 @@ externalproject_add( libmpeg2
 	BUILD_COMMAND make V=0 CFLAGS=${LIBMPEG2_CFLAGS}
 	INSTALL_DIR ${CMAKE_CURRENT_BINARY_DIR}/3rdparty
 	INSTALL_COMMAND make LIBTOOLFLAGS=--silent install
+	BUILD_BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/3rdparty/lib/libmpeg2.a
 	${DOWNLOAD_ARGS}
 )
 
