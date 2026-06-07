@@ -1,11 +1,9 @@
 name: CMake-Libretro-Core
 
 on:
+  pull_request:
   release:
     types: [published]
-
-env:
-  BUILD_TYPE: Release
 
 permissions:
   contents: write
@@ -25,6 +23,10 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+
+    - uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        key: libretro-linux-${{ matrix.arch }}
 
     - name: Install Dependencies
       run: |
@@ -47,23 +49,98 @@ jobs:
       run: |
         mkdir build
         cd build
-        cmake ../src -DLIBRETRO=ON
-        make hypseus_singe_libretro
+        cmake ../src -DLIBRETRO=ON \
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+        make hypseus_singe_libretro -j$(nproc)
 
     - name: Rename artifact
       run: cp build/hypseus_singe_libretro.so hypseus_singe_libretro-linux-${{ matrix.arch }}.so
 
+    - name: Upload artifact (PR)
+      if: github.event_name == 'pull_request'
+      uses: actions/upload-artifact@v4
+      with:
+        name: hypseus_singe_libretro-linux-${{ matrix.arch }}
+        path: hypseus_singe_libretro-linux-${{ matrix.arch }}.so
+
     - name: Upload release asset
+      if: github.event_name == 'release'
       uses: softprops/action-gh-release@v2
       with:
         files: hypseus_singe_libretro-linux-${{ matrix.arch }}.so
 
-  build-macos:
-    runs-on: macos-latest
-    name: Build libretro core (macOS)
+  build-windows:
+    runs-on: windows-latest
+    name: Build libretro core (windows-x86_64)
 
     steps:
     - uses: actions/checkout@v4
+
+    - uses: msys2/setup-msys2@v2
+      with:
+        msystem: MINGW64
+        update: true
+        install: >-
+          mingw-w64-x86_64-cmake
+          mingw-w64-x86_64-gcc
+          mingw-w64-x86_64-ninja
+          mingw-w64-x86_64-pkg-config
+          mingw-w64-x86_64-SDL2
+          mingw-w64-x86_64-SDL2_ttf
+          mingw-w64-x86_64-SDL2_image
+          mingw-w64-x86_64-SDL2_mixer
+          mingw-w64-x86_64-libvorbis
+          mingw-w64-x86_64-libogg
+          mingw-w64-x86_64-libzip
+          mingw-w64-x86_64-zlib
+          mingw-w64-x86_64-ccache
+          autoconf
+          automake
+          libtool
+
+    - uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        key: libretro-windows-x86_64
+        variant: ccache
+
+    - name: Build
+      shell: msys2 {0}
+      run: |
+        mkdir build
+        cd build
+        cmake ../src -DLIBRETRO=ON -G Ninja \
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+        cmake --build . --target hypseus_singe_libretro --parallel $(nproc)
+
+    - name: Rename artifact
+      shell: msys2 {0}
+      run: cp build/hypseus_singe_libretro.dll hypseus_singe_libretro-windows-x86_64.dll
+
+    - name: Upload artifact (PR)
+      if: github.event_name == 'pull_request'
+      uses: actions/upload-artifact@v4
+      with:
+        name: hypseus_singe_libretro-windows-x86_64
+        path: hypseus_singe_libretro-windows-x86_64.dll
+
+    - name: Upload release asset
+      if: github.event_name == 'release'
+      uses: softprops/action-gh-release@v2
+      with:
+        files: hypseus_singe_libretro-windows-x86_64.dll
+
+  build-macos:
+    runs-on: macos-latest
+    name: Build libretro core (macOS-arm64)
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        key: libretro-macos-arm64
 
     - name: Install Dependencies
       run: |
@@ -85,11 +162,23 @@ jobs:
       run: |
         mkdir build
         cd build
-        cmake ../src -DLIBRETRO=ON
-        make hypseus_singe_libretro
+        cmake ../src -DLIBRETRO=ON \
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+        make hypseus_singe_libretro -j$(sysctl -n hw.logicalcpu)
+
+    - name: Rename artifact
+      run: cp build/hypseus_singe_libretro.dylib hypseus_singe_libretro-macOS-arm64.dylib
+
+    - name: Upload artifact (PR)
+      if: github.event_name == 'pull_request'
+      uses: actions/upload-artifact@v4
+      with:
+        name: hypseus_singe_libretro-macOS-arm64
+        path: hypseus_singe_libretro-macOS-arm64.dylib
 
     - name: Upload release asset
+      if: github.event_name == 'release'
       uses: softprops/action-gh-release@v2
       with:
-        files: build/hypseus_singe_libretro.dylib
-        asset_name: hypseus_singe_libretro-macOS.dylib
+        files: hypseus_singe_libretro-macOS-arm64.dylib
