@@ -112,7 +112,7 @@ jobs:
         cmake ../src -DLIBRETRO=ON -G "MSYS Makefiles" \
           -DCMAKE_C_COMPILER_LAUNCHER=ccache \
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-        make hypseus_singe_libretro -j$(nproc)
+        make hypseus_singe_libretro VERBOSE=1 2>&1 | tail -80
 
     - name: Rename artifact
       shell: msys2 {0}
