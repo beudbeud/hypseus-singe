@@ -205,6 +205,14 @@ if(LIBRETRO)
         ${PROJECT_SOURCE_DIR}   # so libretro.cpp can reach "../globals.h" etc.
     )
     target_link_libraries( hypseus_singe_libretro ${HYPSEUS_LINK_LIBS} )
+    # MinGW ld is single-pass: singeproxy.a references Mix_*/IMG_*/TTF_* but
+    # those symbols only land in the undefined list after singeproxy.a is
+    # processed, by which point SDL2_mixer/image/ttf have already been skipped.
+    # Repeating them after HYPSEUS_LINK_LIBS ensures they are seen last.
+    if(WIN32)
+        target_link_libraries( hypseus_singe_libretro
+            ${SDL2_MIXER_LIBRARY} ${SDL2_IMAGE_LIBRARY} ${SDL2_TTF_LIBRARY} )
+    endif()
     # libretro cores must not have a "lib" prefix
     set_target_properties( hypseus_singe_libretro PROPERTIES PREFIX "" )
 
