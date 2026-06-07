@@ -1043,7 +1043,11 @@ bool retro_load_game(const struct retro_game_info *info)
     /* ------------------------------------------------------------------ */
     {
         std::string log_dir = g_homedir.get_homedir() + "/logs";
+#ifdef _WIN32
+        mkdir(log_dir.c_str());
+#else
         mkdir(log_dir.c_str(), 0755);
+#endif
         std::string log_file = log_dir + "/hypseus.log";
         static plog::ColorConsoleAppender<plog::TxtFormatter> s_plog_console;
         static plog::RollingFileAppender<plog::TxtFormatter>  s_plog_file(log_file.c_str(), 500000, 3);
