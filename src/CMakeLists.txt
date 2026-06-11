@@ -213,23 +213,24 @@ if(LIBRETRO)
         target_link_libraries( hypseus_singe_libretro
             ${SDL2_MIXER_LIBRARY} ${SDL2_IMAGE_LIBRARY} ${SDL2_TTF_LIBRARY} )
         # Pull in all transitive static deps of SDL2_ttf/image/mixer
-        # (freetype, harfbuzz, png, jpeg, mpg123, …) but exclude SDL2 itself
-        # which must remain dynamic so it uses RetroArch's SDL2.dll.
-        pkg_check_modules(SDL2_TTF_S   REQUIRED STATIC SDL2_ttf)
-        pkg_check_modules(SDL2_IMAGE_S REQUIRED STATIC SDL2_image)
-        pkg_check_modules(SDL2_MIXER_S REQUIRED STATIC SDL2_mixer)
-        foreach(_var SDL2_TTF_S_STATIC_LIBRARIES
-                     SDL2_IMAGE_S_STATIC_LIBRARIES
-                     SDL2_MIXER_S_STATIC_LIBRARIES)
-            list(FILTER ${_var} EXCLUDE REGEX "^SDL2$")
+        # (freetype, harfbuzz, png, jpeg, mpg123, …) via pkg-config --static.
+        # SDL2 itself is excluded: it stays dynamic (RetroArch ships SDL2.dll).
+        execute_process(
+            COMMAND pkg-config --libs-only-l --static SDL2_ttf SDL2_image SDL2_mixer
+            OUTPUT_VARIABLE _WIN32_STATIC_RAW
+            OUTPUT_STRIP_TRAILING_WHITESPACE)
+        string(REGEX REPLACE "[ \t]+" ";" _WIN32_STATIC_LIST "${_WIN32_STATIC_RAW}")
+        set(_WIN32_STATIC_LIBS)
+        foreach(_f ${_WIN32_STATIC_LIST})
+            if(_f MATCHES "^-l(.+)" AND NOT CMAKE_MATCH_1 STREQUAL "SDL2")
+                list(APPEND _WIN32_STATIC_LIBS ${CMAKE_MATCH_1})
+            endif()
         endforeach()
-        set(_SDL2_TRANSITIVE
-            ${SDL2_TTF_S_STATIC_LIBRARIES}
-            ${SDL2_IMAGE_S_STATIC_LIBRARIES}
-            ${SDL2_MIXER_S_STATIC_LIBRARIES})
-        list(REMOVE_DUPLICATES _SDL2_TRANSITIVE)
+        list(REMOVE_DUPLICATES _WIN32_STATIC_LIBS)
         target_link_libraries( hypseus_singe_libretro
-            -Wl,-Bstatic ${_SDL2_TRANSITIVE} -Wl,-Bdynamic )
+            -Wl,-Bstatic -Wl,--start-group
+            ${_WIN32_STATIC_LIBS}
+            -Wl,--end-group -Wl,-Bdynamic )
         # Statically link MinGW C/C++ runtimes so the DLL doesn't depend on
         # libgcc_s_seh-1.dll / libstdc++-6.dll / libwinpthread-1.dll.
         target_link_options( hypseus_singe_libretro PRIVATE
