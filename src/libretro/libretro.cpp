@@ -578,6 +578,8 @@ static bool parse_commands_file(const char *path,
  * Libretro API implementation
  * ====================================================================== */
 
+extern "C" {
+
 void retro_set_environment(retro_environment_t cb)
 {
     environ_cb = cb;
@@ -1540,3 +1542,5 @@ unsigned retro_get_region(void) { return RETRO_REGION_NTSC; }
 
 void  *retro_get_memory_data(unsigned) { return nullptr; }
 size_t retro_get_memory_size(unsigned) { return 0; }
+
+} /* extern "C" */
