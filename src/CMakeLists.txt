@@ -134,8 +134,8 @@ add_dependencies( game vldp )
 add_dependencies( sound vldp )
 
 if(WIN32 AND LIBRETRO)
-    # Prefer static archives so all deps except SDL2 are baked into the DLL.
-    # SDL2 itself stays dynamic: RetroArch ships SDL2.dll on Windows.
+    # Prefer static archives: the libretro core must be fully self-contained.
+    # RetroArch does not provide SDL2.dll (or any other dep) to cores on Windows.
     set(CMAKE_FIND_LIBRARY_SUFFIXES .a .dll.a)
 endif()
 
@@ -148,6 +148,12 @@ find_package(Vorbis REQUIRED)
 if(APPLE)
     set( SDL2_LIBRARIES ${SDL2_LIBRARY} )
 endif(APPLE)
+
+if(WIN32 AND LIBRETRO)
+    # PKG_SEARCH_MODULE set SDL2_LIBRARIES to the dynamic import lib (-lSDL2);
+    # override with the static archive found by find_package above.
+    set(SDL2_LIBRARIES ${SDL2_LIBRARY})
+endif()
 
 # Common link libraries shared by both targets
 set(HYPSEUS_LINK_LIBS
@@ -204,17 +210,17 @@ if(LIBRETRO)
     if(WIN32)
         target_link_libraries( hypseus_singe_libretro
             ${SDL2_MIXER_LIBRARY} ${SDL2_IMAGE_LIBRARY} ${SDL2_TTF_LIBRARY} )
-        # Pull in all transitive static deps of SDL2_ttf/image/mixer
-        # (freetype, harfbuzz, png, jpeg, mpg123, …) via pkg-config --static.
-        # SDL2 itself is excluded: it stays dynamic (RetroArch ships SDL2.dll).
+        # Pull in all transitive static deps of SDL2 and its satellite libs
+        # (freetype, harfbuzz, png, jpeg, mpg123, directx stubs, …).
+        # Standard libretro practice: each core is fully self-contained on Windows.
         execute_process(
-            COMMAND pkg-config --libs-only-l --static SDL2_ttf SDL2_image SDL2_mixer
+            COMMAND pkg-config --libs-only-l --static SDL2 SDL2_ttf SDL2_image SDL2_mixer
             OUTPUT_VARIABLE _WIN32_STATIC_RAW
             OUTPUT_STRIP_TRAILING_WHITESPACE)
         string(REGEX REPLACE "[ \t]+" ";" _WIN32_STATIC_LIST "${_WIN32_STATIC_RAW}")
         set(_WIN32_STATIC_LIBS)
         foreach(_f ${_WIN32_STATIC_LIST})
-            if(_f MATCHES "^-l(.+)" AND NOT CMAKE_MATCH_1 STREQUAL "SDL2")
+            if(_f MATCHES "^-l(.+)")
                 list(APPEND _WIN32_STATIC_LIBS ${CMAKE_MATCH_1})
             endif()
         endforeach()
