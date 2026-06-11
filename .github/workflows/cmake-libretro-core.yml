@@ -120,11 +120,12 @@ jobs:
       run: |
         mkdir dist
         cp build/hypseus_singe_libretro.dll dist/hypseus_singe_libretro-windows-x86_64.dll
-        # Collect all MSYS2/MinGW64 runtime DLLs the core dynamically depends on
-        # (excludes Windows system DLLs; MinGW C/C++ runtimes are already linked
-        # statically via -static-libgcc/-static-libstdc++/-lwinpthread)
+        # Collect all MSYS2/MinGW64 runtime DLLs the core dynamically depends on.
+        # Excludes Windows system DLLs, MinGW C/C++ runtimes (statically linked),
+        # and SDL2.dll which RetroArch already bundles in its own directory.
         ldd dist/hypseus_singe_libretro-windows-x86_64.dll \
           | grep -i '/mingw64/' \
+          | grep -iv '/SDL2\.dll' \
           | awk '{print $3}' \
           | sort -u \
           | while IFS= read -r dll; do cp "$dll" dist/; done
