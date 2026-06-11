@@ -133,6 +133,12 @@ add_dependencies( ldp-out vldp )
 add_dependencies( game vldp )
 add_dependencies( sound vldp )
 
+if(WIN32 AND LIBRETRO)
+    # Prefer static archives so all deps except SDL2 are baked into the DLL.
+    # SDL2 itself stays dynamic: RetroArch ships SDL2.dll on Windows.
+    set(CMAKE_FIND_LIBRARY_SUFFIXES .a .dll.a)
+endif()
+
 find_package(SDL2 REQUIRED)
 find_package(SDL2_TTF REQUIRED)
 find_package(SDL2_IMAGE REQUIRED)
@@ -198,9 +204,26 @@ if(LIBRETRO)
     if(WIN32)
         target_link_libraries( hypseus_singe_libretro
             ${SDL2_MIXER_LIBRARY} ${SDL2_IMAGE_LIBRARY} ${SDL2_TTF_LIBRARY} )
+        # Pull in all transitive static deps of SDL2_ttf/image/mixer
+        # (freetype, harfbuzz, png, jpeg, mpg123, …) but exclude SDL2 itself
+        # which must remain dynamic so it uses RetroArch's SDL2.dll.
+        pkg_check_modules(SDL2_TTF_S   REQUIRED STATIC SDL2_ttf)
+        pkg_check_modules(SDL2_IMAGE_S REQUIRED STATIC SDL2_image)
+        pkg_check_modules(SDL2_MIXER_S REQUIRED STATIC SDL2_mixer)
+        foreach(_var SDL2_TTF_S_STATIC_LIBRARIES
+                     SDL2_IMAGE_S_STATIC_LIBRARIES
+                     SDL2_MIXER_S_STATIC_LIBRARIES)
+            list(FILTER ${_var} EXCLUDE REGEX "^SDL2$")
+        endforeach()
+        set(_SDL2_TRANSITIVE
+            ${SDL2_TTF_S_STATIC_LIBRARIES}
+            ${SDL2_IMAGE_S_STATIC_LIBRARIES}
+            ${SDL2_MIXER_S_STATIC_LIBRARIES})
+        list(REMOVE_DUPLICATES _SDL2_TRANSITIVE)
+        target_link_libraries( hypseus_singe_libretro
+            -Wl,-Bstatic ${_SDL2_TRANSITIVE} -Wl,-Bdynamic )
         # Statically link MinGW C/C++ runtimes so the DLL doesn't depend on
-        # libgcc_s_seh-1.dll / libstdc++-6.dll / libwinpthread-1.dll which are
-        # absent from a typical RetroArch Windows installation.
+        # libgcc_s_seh-1.dll / libstdc++-6.dll / libwinpthread-1.dll.
         target_link_options( hypseus_singe_libretro PRIVATE
             -static-libgcc -static-libstdc++
             -Wl,-Bstatic,-lwinpthread,-Bdynamic )
