@@ -212,17 +212,17 @@ if(LIBRETRO)
     if(WIN32)
         target_link_libraries( hypseus_singe_libretro
             ${SDL2_MIXER_LIBRARY} ${SDL2_IMAGE_LIBRARY} ${SDL2_TTF_LIBRARY} )
-        # Pull in all transitive static deps of SDL2_ttf/image/mixer
-        # (freetype, harfbuzz, png, jpeg, mpg123, …) via pkg-config --static.
-        # SDL2 itself is excluded: it stays dynamic (RetroArch ships SDL2.dll).
+        # Pull in all transitive static deps of SDL2 and its satellite libs
+        # (freetype, harfbuzz, png, jpeg, mpg123, directx stubs, …).
+        # Standard libretro practice: each core is fully self-contained on Windows.
         execute_process(
-            COMMAND pkg-config --libs-only-l --static SDL2_ttf SDL2_image SDL2_mixer
+            COMMAND pkg-config --libs-only-l --static SDL2 SDL2_ttf SDL2_image SDL2_mixer
             OUTPUT_VARIABLE _WIN32_STATIC_RAW
             OUTPUT_STRIP_TRAILING_WHITESPACE)
         string(REGEX REPLACE "[ \t]+" ";" _WIN32_STATIC_LIST "${_WIN32_STATIC_RAW}")
         set(_WIN32_STATIC_LIBS)
         foreach(_f ${_WIN32_STATIC_LIST})
-            if(_f MATCHES "^-l(.+)" AND NOT CMAKE_MATCH_1 STREQUAL "SDL2")
+            if(_f MATCHES "^-l(.+)")
                 list(APPEND _WIN32_STATIC_LIBS ${CMAKE_MATCH_1})
             endif()
         endforeach()
