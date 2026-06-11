@@ -198,6 +198,12 @@ if(LIBRETRO)
     if(WIN32)
         target_link_libraries( hypseus_singe_libretro
             ${SDL2_MIXER_LIBRARY} ${SDL2_IMAGE_LIBRARY} ${SDL2_TTF_LIBRARY} )
+        # Statically link MinGW C/C++ runtimes so the DLL doesn't depend on
+        # libgcc_s_seh-1.dll / libstdc++-6.dll / libwinpthread-1.dll which are
+        # absent from a typical RetroArch Windows installation.
+        target_link_options( hypseus_singe_libretro PRIVATE
+            -static-libgcc -static-libstdc++
+            -Wl,-Bstatic,-lwinpthread,-Bdynamic )
     endif()
     # libretro cores must not have a "lib" prefix
     set_target_properties( hypseus_singe_libretro PROPERTIES PREFIX "" )
