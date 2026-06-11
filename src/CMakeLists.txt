@@ -233,7 +233,8 @@ if(LIBRETRO)
         # libgcc_s_seh-1.dll / libstdc++-6.dll / libwinpthread-1.dll.
         target_link_options( hypseus_singe_libretro PRIVATE
             -static-libgcc -static-libstdc++
-            -Wl,-Bstatic,-lwinpthread,-Bdynamic )
+            -Wl,-Bstatic,-lwinpthread,-Bdynamic
+            -Wl,--export-all-symbols )
     endif()
     # libretro cores must not have a "lib" prefix
     set_target_properties( hypseus_singe_libretro PROPERTIES PREFIX "" )
