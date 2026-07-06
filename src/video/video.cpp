@@ -2111,6 +2111,21 @@ static inline void blendPlane(const uint8_t *src, uint8_t *dst, int w, int h,
     }
 }
 
+// Copy a YUV plane whose source rows may be padded (srcPitch >= w) into a
+// tightly-packed destination (dst stride == w). libmpeg2 aligns its decode
+// stride to macroblock boundaries, so srcPitch can exceed the visible width;
+// a flat memcpy of w*h bytes would then read across the padding and skew every
+// row (the blocky video corruption seen on some platforms).
+static inline void copyPlane(uint8_t *dst, const uint8_t *src, int w, int h, int srcPitch)
+{
+    if (srcPitch == w) {
+        memcpy(dst, src, (size_t)w * h);
+    } else {
+        for (int y = 0; y < h; ++y)
+            memcpy(dst + (size_t)y * w, src + (size_t)y * srcPitch, w);
+    }
+}
+
 static inline void lumaControl(const uint8_t *src, uint8_t *dst, int width, int height,
         int srcPitch, int dstPitch)
 {
@@ -2179,9 +2194,12 @@ int vid_update_yuv_overlay(uint8_t *Yplane, uint8_t *Uplane, uint8_t *Vplane,
         break;
     default:
         if (!g_yuv_flags) {
-            memcpy(g_yuv_surface->Yplane, Yplane, g_yuv_surface->Ysize);
-            memcpy(g_yuv_surface->Uplane, Uplane, g_yuv_surface->Usize);
-            memcpy(g_yuv_surface->Vplane, Vplane, g_yuv_surface->Vsize);
+            copyPlane(g_yuv_surface->Yplane, Yplane,
+                g_yuv_surface->width, g_yuv_surface->height, Ypitch);
+            copyPlane(g_yuv_surface->Uplane, Uplane,
+                g_yuv_surface->width / 2, g_yuv_surface->height / 2, Upitch);
+            copyPlane(g_yuv_surface->Vplane, Vplane,
+                g_yuv_surface->width / 2, g_yuv_surface->height / 2, Vpitch);
             break;
         }
 
@@ -2190,7 +2208,8 @@ int vid_update_yuv_overlay(uint8_t *Yplane, uint8_t *Uplane, uint8_t *Vplane,
                 g_yuv_surface->height, Ypitch, g_yuv_surface->Ypitch);
 
         } else {
-            memcpy(g_yuv_surface->Yplane, Yplane, g_yuv_surface->Ysize);
+            copyPlane(g_yuv_surface->Yplane, Yplane,
+                g_yuv_surface->width, g_yuv_surface->height, Ypitch);
         }
 
         if (g_yuv_flags & YUV_FLAG_LUMA) {
@@ -2211,9 +2230,13 @@ int vid_update_yuv_overlay(uint8_t *Yplane, uint8_t *Uplane, uint8_t *Vplane,
         break;
     }
 
-    g_yuv_surface->Ypitch = Ypitch;
-    g_yuv_surface->Upitch = Upitch;
-    g_yuv_surface->Vpitch = Vpitch;
+    // The destination planes are tightly packed, so record the tight stride
+    // (width) rather than the padded source pitch. Downstream readers
+    // (vid_get_yuv_pixel, SDL_UpdateYUVTexture, the libretro YV12 packing) all
+    // use these values, and must match how the data is actually stored.
+    g_yuv_surface->Ypitch = g_yuv_surface->width;
+    g_yuv_surface->Upitch = g_yuv_surface->width / 2;
+    g_yuv_surface->Vpitch = g_yuv_surface->width / 2;
 
     g_yuv_video_needs_update = true;
 
