@@ -1,0 +1,202 @@
+name: CMake-Libretro-Core
+
+on:
+  pull_request:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+
+    runs-on: ${{ matrix.runner }}
+    name: Build libretro core (linux-${{ matrix.arch }})
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        key: libretro-linux-${{ matrix.arch }}
+
+    - name: Install Dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y \
+          gcc g++ cmake ninja-build git pkg-config \
+          libogg-dev libvorbis-dev libzip-dev zlib1g-dev \
+          libfreetype-dev libharfbuzz-dev \
+          libpng-dev libjpeg-dev libtiff-dev libwebp-dev \
+          libx11-dev libxext-dev libxrandr-dev libxcursor-dev \
+          libxi-dev libxfixes-dev libxss-dev libxtst-dev libxkbcommon-dev \
+          libgl1-mesa-dev libasound2-dev \
+          autoconf automake libtool
+
+    # SDL3 is not packaged in Ubuntu 24.04 (noble) apt; build the stack from
+    # source. SDL requires a video backend on Linux, so X11 is enabled (deps
+    # installed above) and only Wayland is disabled. SDL core installs before
+    # its satellite libraries.
+    - name: Build SDL3 from source
+      run: |
+        set -e
+        for repo in SDL SDL_image SDL_ttf SDL_mixer; do
+          git clone --depth 1 https://github.com/libsdl-org/$repo
+          cmake -S $repo -B $repo/_build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DBUILD_SHARED_LIBS=ON \
+            -DSDL_WAYLAND=OFF \
+            -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF
+          cmake --build $repo/_build
+          sudo cmake --install $repo/_build
+        done
+        sudo ldconfig
+
+    - name: Build
+      run: |
+        mkdir build
+        cd build
+        cmake ../src -DLIBRETRO=ON \
+          -DCMAKE_PREFIX_PATH=/usr/local \
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+        make hypseus_singe_libretro -j$(nproc)
+
+    - name: Rename artifact
+      run: cp build/hypseus_singe_libretro.so hypseus_singe_libretro-linux-${{ matrix.arch }}.so
+
+    - name: Upload artifact (PR)
+      if: github.event_name == 'pull_request'
+      uses: actions/upload-artifact@v4
+      with:
+        name: hypseus_singe_libretro-linux-${{ matrix.arch }}
+        path: hypseus_singe_libretro-linux-${{ matrix.arch }}.so
+
+    - name: Upload release asset
+      if: github.event_name == 'release'
+      uses: softprops/action-gh-release@v2
+      with:
+        files: hypseus_singe_libretro-linux-${{ matrix.arch }}.so
+
+  build-windows:
+    runs-on: windows-latest
+    name: Build libretro core (windows-x86_64)
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: msys2/setup-msys2@v2
+      with:
+        msystem: MINGW64
+        update: true
+        install: >-
+          mingw-w64-x86_64-cmake
+          mingw-w64-x86_64-gcc
+          mingw-w64-x86_64-pkg-config
+          mingw-w64-x86_64-sdl3
+          mingw-w64-x86_64-sdl3-ttf
+          mingw-w64-x86_64-sdl3-image
+          mingw-w64-x86_64-sdl3-mixer
+          mingw-w64-x86_64-libvorbis
+          mingw-w64-x86_64-libogg
+          mingw-w64-x86_64-libzip
+          mingw-w64-x86_64-zlib
+          mingw-w64-x86_64-ccache
+          make
+          autoconf
+          automake
+          libtool
+
+    - uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        key: libretro-windows-x86_64
+        variant: ccache
+
+    - name: Build
+      shell: msys2 {0}
+      run: |
+        mkdir build
+        cd build
+        cmake ../src -DLIBRETRO=ON -G "MSYS Makefiles" \
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+        make hypseus_singe_libretro -j$(nproc)
+
+    - name: Rename artifact
+      shell: msys2 {0}
+      run: cp build/hypseus_singe_libretro.dll hypseus_singe_libretro-windows-x86_64.dll
+
+    - name: Upload artifact (PR)
+      if: github.event_name == 'pull_request'
+      uses: actions/upload-artifact@v4
+      with:
+        name: hypseus_singe_libretro-windows-x86_64
+        path: hypseus_singe_libretro-windows-x86_64.dll
+
+    - name: Upload release asset
+      if: github.event_name == 'release'
+      uses: softprops/action-gh-release@v2
+      with:
+        files: hypseus_singe_libretro-windows-x86_64.dll
+
+  build-macos:
+    runs-on: macos-latest
+    name: Build libretro core (macOS-arm64)
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        key: libretro-macos-arm64
+
+    - name: Install Dependencies
+      run: |
+        brew install \
+          cmake \
+          autoconf \
+          automake \
+          libtool \
+          pkg-config \
+          sdl3 \
+          sdl3_ttf \
+          sdl3_image \
+          sdl3_mixer \
+          libvorbis \
+          libogg \
+          libzip
+
+    - name: Build
+      run: |
+        mkdir build
+        cd build
+        cmake ../src -DLIBRETRO=ON \
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+        make hypseus_singe_libretro -j$(sysctl -n hw.logicalcpu)
+
+    - name: Rename artifact
+      run: cp build/hypseus_singe_libretro.dylib hypseus_singe_libretro-macOS-arm64.dylib
+
+    - name: Upload artifact (PR)
+      if: github.event_name == 'pull_request'
+      uses: actions/upload-artifact@v4
+      with:
+        name: hypseus_singe_libretro-macOS-arm64
+        path: hypseus_singe_libretro-macOS-arm64.dylib
+
+    - name: Upload release asset
+      if: github.event_name == 'release'
+      uses: softprops/action-gh-release@v2
+      with:
+        files: hypseus_singe_libretro-macOS-arm64.dylib

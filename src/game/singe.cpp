@@ -30,6 +30,9 @@
 
 #include "singe.h"
 #include "singe/singe_interface.h"
+#ifdef LIBRETRO_CORE
+#include "../hypseus.h"
+#endif
 
 // Win32 doesn't use strcasecmp, it uses stricmp (lame)
 #ifdef WIN32
@@ -90,6 +93,8 @@ singe::singe() : m_pScoreboard(NULL)
     m_crosshair               = true;
     m_running                 = false;
     m_zlua                    = false;
+    m_scriptLoaded            = false;
+    m_bHandleCmdlineInit      = false;
 
     singe_xratio              = 0.0;
     singe_yratio              = 0.0;
@@ -283,6 +288,9 @@ void singe::start()
 
         m_running = true;
         while (!get_quitflag()) {
+#ifdef LIBRETRO_CORE
+            if (libretro_singe_frame_begin()) continue;
+#endif
             g_pSingeOut->sep_call_lua("onOverlayUpdate", ">i", &intReturn);
             if (intReturn == 1) {
                 m_video_overlay_needs_update = true;
@@ -290,17 +298,26 @@ void singe::start()
 
             if (g_js.jrelx | g_js.jrely)
                 ProcessJoyStruct();
-
             blit();
             SDL_check_input();
             samples::do_queued_callbacks(); // hack to ensure sound callbacks are
                                             // called at a time when lua can
                                             // accept them without crashing
+#ifdef LIBRETRO_CORE
+            libretro_update_lua_snap();
+#endif
             g_ldp->think_delay(10);         // don't hog cpu, and advance timer
         }
 
         m_running = false;
+#ifndef LIBRETRO_CORE
+        /* In the libretro context there is no "natural" game exit: quitflag is
+         * always set externally by retro_unload_game() (restart or close).
+         * Lua onShutdown() may loop on discGetCurrentFrame() which is frozen
+         * once think_delay() stops being called, causing SDL_WaitThread() in
+         * retro_unload_game() to block indefinitely (observed with Mad Dog). */
         g_pSingeOut->sep_call_lua("onShutdown", "");
+#endif
     } // end if there was no startup error
 
     // always call sep_shutdown just to make sure everything gets cleaned up
@@ -387,21 +404,33 @@ void singe::ProcessJoyStruct()
     g_pSingeOut->sep_do_mouse_move(g_js.xmov, g_js.ymov, g_js.jrelx, g_js.jrely, NOMOUSE);
 }
 
+#ifdef LIBRETRO_CORE
+size_t singe::serialize_lua_state(uint8_t *buf, size_t max)
+{
+    if (!g_pSingeOut || !g_pSingeOut->sep_serialize_lua) return 0;
+    return g_pSingeOut->sep_serialize_lua(buf, max);
+}
+
+bool singe::unserialize_lua_state(const uint8_t *buf, size_t size)
+{
+    if (!g_pSingeOut || !g_pSingeOut->sep_unserialize_lua) return false;
+    return g_pSingeOut->sep_unserialize_lua(buf, size);
+}
+#endif
+
 // game-specific command line arguments handled here
 bool singe::handle_cmdline_arg(const char *arg)
 {
-    const int len            = 256;
-    bool bResult             = false;
-    static bool bInit        = false;
-    static bool scriptLoaded = false;
-    char s[len]              = {0};
+    const int len = 256;
+    bool bResult  = false;
+    char s[len]   = {0};
     int i;
 
-    if (!bInit) {
+    if (!m_bHandleCmdlineInit) {
         g_game->set_overlay_upgrade(GAME_OVERLAY_UPGRADE, true);
         g_game->set_dynamic_overlay(true);
         m_upgrade_overlay |= (1 << 0);
-        bInit = true;
+        m_bHandleCmdlineInit = true;
     }
 
     if (strcasecmp(arg, "-script") == 0 || strcasecmp(arg, "-zlua") == 0) {
@@ -412,8 +441,8 @@ bool singe::handle_cmdline_arg(const char *arg)
         get_next_word(s, sizeof(s));
 
         if (mpo_file_exists(s)) {
-            if (!scriptLoaded) {
-                bResult = scriptLoaded = true;
+            if (!m_scriptLoaded) {
+                bResult = m_scriptLoaded = true;
                 m_strGameScript = s;
             } else {
                 printerror("Only one game script or zip may be loaded at a time!");

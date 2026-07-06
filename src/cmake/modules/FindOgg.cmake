@@ -25,11 +25,11 @@ find_path (OGG_INCLUDE_DIR ogg/ogg.h
 # The provided project files name the library with the lib prefix.
 find_library (OGG_LIBRARY
 	NAMES
-    libogg.a
 		ogg
-		ogg_static
 		libogg
+		ogg_static
 		libogg_static
+		libogg.a
 	HINTS
 		${PC_OGG_LIBDIR}
 		${PC_OGG_LIBRARY_DIRS}

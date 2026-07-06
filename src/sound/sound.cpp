@@ -61,6 +61,13 @@ bool g_sound_enabled = true; // whether sound is enabled
 
 bool g_bSoundMuted = false; // whether sound is muted
 
+static void (*g_audio_capture_hook)(uint8_t *, int) = nullptr;
+
+void set_audio_capture_hook(void (*hook)(uint8_t *, int))
+{
+    g_audio_capture_hook = hook;
+}
+
 struct chip *g_chip_head = NULL;     // pointer to the first sound chip in
                                      // our linked list of chips's
 unsigned int g_uSoundChipNextID = 0; // the idea that the next chip to get
@@ -599,6 +606,10 @@ void SDLCALL StreamAudio(void *userdata, SDL_AudioStream *stream, int additional
 
     std::vector<Uint8> mix(bytes);
     g_soundmix_callback(mix.data(), bytes);
+
+    if (g_audio_capture_hook)
+        g_audio_capture_hook(mix.data(), (int)bytes);
+
     SDL_PutAudioStreamData(stream, mix.data(), bytes);
 }
 
@@ -764,6 +775,7 @@ void shutdown_chip()
         delete[] temp->buffer;
         delete temp;
     }
+    g_chip_head = NULL;
 }
 
 void update_buffer()

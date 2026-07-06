@@ -84,6 +84,18 @@ SDL_Texture *g_bezel_texture        = NULL;
 SDL_Texture *g_aux_texture          = NULL;
 SDL_Texture *g_mix_texture          = NULL;
 SDL_Surface *g_scoreboard_blit_surface = NULL;
+#ifdef LIBRETRO_CORE
+static SDL_Surface *g_lr_surface         = NULL;    /* off-screen render target for libretro */
+static SDL_Surface *g_blit_surface       = NULL;    /* 320x240 software scoreboard/overlay scratch */
+/* Serializes vid_setup_yuv_overlay() (VLDP thread) against vid_blit() (emu thread). */
+static SDL_Mutex   *g_yuv_lifecycle_mutex = NULL;
+static uint8_t     *g_yuv_packed_buf        = nullptr; /* contiguous YV12 input for SDL_ConvertPixels */
+static int          g_yuv_packed_size       = 0;
+static uint32_t    *g_yuv_argb_buf          = nullptr; /* YUV→ARGB scratch (sized to YUV dims) */
+static int          g_yuv_argb_size         = 0;       /* in pixels */
+static bool         g_lr_scoreboard_visible = true;
+static void       (*g_frame_ready_hook)()   = nullptr;
+#endif
 
 SDL_Rect g_aux_rect;
 SDL_Rect g_border_rect;
@@ -409,6 +421,109 @@ bool init_display()
     bool result = false;
     static bool notify = false;
     constexpr char title[] = "HYPSEUS Singe: Multiple Arcade Laserdisc Emulator";
+
+#ifdef LIBRETRO_CORE
+    /* -----------------------------------------------------------------------
+     * Libretro path: no window, no SDL display driver.
+     * Use SDL_CreateSoftwareRenderer on an off-screen surface so the rest of
+     * the game render code (textures, overlays, vid_blit) works unchanged.
+     * --------------------------------------------------------------------- */
+    {
+        if (!g_yuv_lifecycle_mutex)
+            g_yuv_lifecycle_mutex = SDL_CreateMutex();
+
+        g_overlay_width  = g_game->get_video_overlay_width();
+        g_overlay_height = g_game->get_video_overlay_height();
+        g_probe_width    = std::max((int)g_probe_width,  320);
+        g_probe_height   = std::max((int)g_probe_height, 240);
+
+        if (g_video_resized) {
+            g_viewport_width  = g_video_width;
+            g_viewport_height = g_video_height;
+        } else {
+            g_viewport_width  = g_probe_width;
+            g_viewport_height = g_probe_height;
+        }
+
+        if (g_overlay_surface) { SDL_DestroySurface(g_overlay_surface); g_overlay_surface = nullptr; }
+        if (g_scoreboard_renderer) { SDL_DestroyRenderer(g_scoreboard_renderer); g_scoreboard_renderer = nullptr; }
+        if (g_blit_surface)   { SDL_DestroySurface(g_blit_surface);   g_blit_surface   = nullptr; }
+        /* The text engine holds textures registered to the renderer — destroy it
+         * before the renderer, or SDL_DestroyRenderer frees them first (double free). */
+        if (g_font_engine) { TTF_DestroyRendererTextEngine(g_font_engine); g_font_engine = nullptr; }
+        if (g_font)   { TTF_CloseFont(g_font);     g_font   = nullptr; }
+        if (g_ttfont) { TTF_CloseFont(g_ttfont);   g_ttfont = nullptr; }
+        /* Destroying the renderer also destroys all its textures (overlay, yuv…). */
+        if (g_renderer) { SDL_DestroyRenderer(g_renderer); g_renderer = nullptr; g_overlay_texture = nullptr; g_yuv_texture = nullptr; }
+        if (g_lr_surface) { SDL_DestroySurface(g_lr_surface); g_lr_surface = nullptr; }
+
+        g_lr_surface = SDL_CreateSurface(
+            g_viewport_width, g_viewport_height, SDL_PIXELFORMAT_ARGB8888);
+        if (!g_lr_surface) {
+            LOGE << fmt("LIBRETRO init_display: surface: %s", SDL_GetError());
+            return false;
+        }
+
+        g_renderer = SDL_CreateSoftwareRenderer(g_lr_surface);
+        if (!g_renderer) {
+            LOGE << fmt("LIBRETRO init_display: renderer: %s", SDL_GetError());
+            SDL_DestroySurface(g_lr_surface); g_lr_surface = nullptr;
+            return false;
+        }
+
+        g_logical_rect  = {0, 0, g_viewport_width, g_viewport_height};
+        format_window_render(); /* sets g_scaling_rect, calls load_fonts() */
+
+        g_overlay_surface = SDL_CreateSurface(
+            (int)std::max(g_overlay_width, 1u), (int)std::max(g_overlay_height, 1u),
+            SDL_PIXELFORMAT_RGBA8888);
+        if (g_overlay_surface) SDL_FillSurfaceRect(g_overlay_surface, NULL, 0x00000000);
+        g_blit_surface = SDL_CreateSurface(320, 240, SDL_PIXELFORMAT_RGBA8888);
+        if (g_blit_surface) SDL_FillSurfaceRect(g_blit_surface, NULL, 0x00000000);
+
+        /* Scoreboard support: create g_scoreboard_blit_surface and a software
+         * renderer targeting g_blit_surface so the draw_led pipeline works
+         * without a real scoreboard window. */
+        if (g_game && g_game->m_software_scoreboard && g_blit_surface) {
+            if (!g_scoreboard_blit_surface)
+                g_scoreboard_blit_surface = SDL_CreateSurface(g_scoreboard_w, g_scoreboard_h,
+                                        SDL_PIXELFORMAT_RGBA8888);
+            if (g_scoreboard_blit_surface) SDL_FillSurfaceRect(g_scoreboard_blit_surface, NULL, 0x000000ff);
+            g_scoreboard_renderer = SDL_CreateSoftwareRenderer(g_blit_surface);
+        }
+
+        if (g_overlay_surface) {
+            if (g_other_bmps[B_OVERLAY_LEDS]) {
+                ConvertSurface(&g_other_bmps[B_OVERLAY_LEDS],    g_overlay_surface->format);
+                SDL_SetSurfaceColorKey(g_other_bmps[B_OVERLAY_LEDS],    true, 0x000000ff);
+            }
+            if (g_other_bmps[B_OVERLAY_LDP1450]) {
+                ConvertSurface(&g_other_bmps[B_OVERLAY_LDP1450], g_overlay_surface->format);
+                SDL_SetSurfaceColorKey(g_other_bmps[B_OVERLAY_LDP1450], true, 0x000000ff);
+            }
+        }
+
+        g_enhance_overlay = g_game->has_overlay_upgrade(GAME_OVERLAY_UPGRADE);
+        g_overlay_dynamic = g_game->get_dynamic_overlay();
+
+        if (g_overlay_width && g_overlay_height) {
+            /* Software renderer does not support TARGET textures; use STREAMING. */
+            g_overlay_texture = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_RGBA8888,
+                                                  SDL_TEXTUREACCESS_STREAMING,
+                                                  g_overlay_width, g_overlay_height);
+            if (g_overlay_texture) {
+                SDL_SetTextureBlendMode(g_overlay_texture, SDL_BLENDMODE_BLEND);
+                SDL_SetTextureAlphaMod(g_overlay_texture, 0xff);
+            }
+        }
+
+        SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, SDL_ALPHA_OPAQUE);
+        SDL_RenderClear(g_renderer);
+
+        notify_stats(g_overlay_width, g_overlay_height, "lr");
+        return true;
+    }
+#endif /* LIBRETRO_CORE */
 
     Uint32 sdl_flags = 0;
     Uint32 sdl_scoreboard_flags = SDL_WINDOW_BORDERLESS;
@@ -785,6 +900,23 @@ void vid_free_yuv_overlay()
 
 ///////////////////////////////////////////////////////
 
+bool vid_get_yuv_pixel(int vx, int vy, uint8_t *Y_out, uint8_t *U_out, uint8_t *V_out)
+{
+    if (!g_yuv_surface) return false;
+    SDL_LockMutex(g_yuv_surface->mutex);
+    bool ok = (vx >= 0 && vy >= 0 &&
+               vx < g_yuv_surface->width && vy < g_yuv_surface->height);
+    if (ok) {
+        *Y_out = g_yuv_surface->Yplane[vy * g_yuv_surface->Ypitch + vx];
+        *U_out = g_yuv_surface->Uplane[(vy / 2) * g_yuv_surface->Upitch + (vx / 2)];
+        *V_out = g_yuv_surface->Vplane[(vy / 2) * g_yuv_surface->Vpitch + (vx / 2)];
+    }
+    SDL_UnlockMutex(g_yuv_surface->mutex);
+    return ok;
+}
+
+///////////////////////////////////////////////////////
+
 // deinitializes the window and renderer we have used.
 // returns true if successful, false if failure
 bool deinit_display()
@@ -836,13 +968,33 @@ bool deinit_display()
 
     g_mix_texture = NULL;
     g_overlay_texture = NULL;
+    g_yuv_texture = NULL;
     g_renderer = NULL;
     g_window = NULL;
     free(subchar);
     free(srtchar);
 
+#ifdef LIBRETRO_CORE
+    if (g_lr_surface)          { SDL_DestroySurface(g_lr_surface);        g_lr_surface          = NULL; }
+    if (g_yuv_lifecycle_mutex) { SDL_DestroyMutex(g_yuv_lifecycle_mutex); g_yuv_lifecycle_mutex = NULL; }
+    delete[] g_yuv_packed_buf; g_yuv_packed_buf = nullptr; g_yuv_packed_size = 0;
+    delete[] g_yuv_argb_buf;   g_yuv_argb_buf   = nullptr; g_yuv_argb_size   = 0;
+#endif
+
     return (true);
 }
+
+#ifdef LIBRETRO_CORE
+// shuts down video display (libretro core only)
+void shutdown_display()
+{
+    LOGD << "Shutting down video display...";
+
+    if (!g_frame_ready_hook)
+        SDL_QuitSubSystem(SDL_INIT_VIDEO);
+}
+#endif
+
 
 // Clear the renderer. Good for avoiding texture mess (YUV, LEDs, Overlay...)
 void vid_blank()
@@ -1001,6 +1153,8 @@ bool draw_led(int value, int x, int y, unsigned char end)
     g_scoreboard_surface = g_led_bmps[value];
     static unsigned char led = 0;
 
+    if (!g_scoreboard_surface) { led++; return false; }
+
     SDL_Rect dest;
     dest.x = (short) x;
     dest.y = (short) y;
@@ -1035,6 +1189,7 @@ bool draw_led(int value, int x, int y, unsigned char end)
 static bool draw_annunciator1(int which)
 {
     g_scoreboard_surface = g_other_bmps[B_ANUN_OFF];
+    if (!g_scoreboard_surface) return false;
 
     SDL_Rect dest;
     uint8_t spacer = 4;
@@ -1073,6 +1228,7 @@ static bool draw_annunciator2(int which)
 
     for (int i = B_ACE_OFF; i < B_EMPTY; i++) {
         g_scoreboard_surface = g_other_bmps[i];
+        if (!g_scoreboard_surface) continue;
         dest.y = (ANUN_RANK_HEIGHT * (i - B_ACE_OFF));
         SDL_FillSurfaceRect(g_aux_blit_surface, &dest, 0x00000000);
         SDL_BlitSurface(g_scoreboard_surface, NULL, g_aux_blit_surface, &dest);
@@ -1080,6 +1236,7 @@ static bool draw_annunciator2(int which)
 
     if (which) {
         g_scoreboard_surface = g_other_bmps[B_MIA + which];
+        if (!g_scoreboard_surface) { g_aux_needs_update = true; return true; }
         dest.y = ANUN_RANK_HEIGHT * --which;
         SDL_BlitSurface(g_scoreboard_surface, NULL, g_aux_blit_surface, &dest);
     }
@@ -1099,6 +1256,8 @@ bool draw_annunciator(int which)
 void draw_overlay_leds(unsigned int values[], int num_digits,
                        int start_x, int y)
 {
+    if (!g_other_bmps[B_OVERLAY_LEDS] || !g_overlay_surface) return;
+
     SDL_Rect src, dest;
 
     dest.x = start_x;
@@ -1243,6 +1402,31 @@ SDL_Window *get_window() { return g_window; }
 SDL_Texture *get_overlay_texture() { return g_overlay_texture; }
 SDL_Surface *get_screen_leds() { return g_overlay_surface; }
 SDL_Rect get_scoreboard_rect() { return g_scoreboard_bezel_rect; }
+SDL_Surface *get_lr_surface() {
+#ifdef LIBRETRO_CORE
+    return g_lr_surface;
+#else
+    return nullptr;
+#endif
+}
+
+void vid_set_scoreboard_visible(bool visible) {
+#ifdef LIBRETRO_CORE
+    g_lr_scoreboard_visible = visible;
+#else
+    (void)visible;
+#endif
+}
+void vid_set_frame_ready_hook(void (*hook)()) {
+#ifdef LIBRETRO_CORE
+    g_frame_ready_hook = hook;
+#else
+    (void)hook;
+#endif
+}
+SDL_Texture *get_screen() { return g_overlay_texture; }
+SDL_Surface *get_screen_blitter() { return g_overlay_surface; }
+SDL_Texture *get_yuv_screen() { return g_yuv_texture; }
 SDL_Rect get_aux_rect() { return g_aux_rect; }
 
 TTF_Font *get_font() { return g_font; }
@@ -1931,6 +2115,9 @@ void vid_scoreboard_switch()
 void vid_setup_yuv_overlay (int width, int height)
 {
     // Prepare the YUV overlay, wich means setting up both the YUV surface and YUV texture.
+#ifdef LIBRETRO_CORE
+    if (g_yuv_lifecycle_mutex) SDL_LockMutex(g_yuv_lifecycle_mutex);
+#endif
 
     // If we have already been here, free things first.
     if (g_yuv_surface) {
@@ -1966,6 +2153,10 @@ void vid_setup_yuv_overlay (int width, int height)
         g_yuv_frect[0]->y = (float)((height / 2) - (g_yuv_frect[0]->h / 2));
         g_yuv_frect[1] = copy_rect(g_yuv_frect[0]);
     }
+
+#ifdef LIBRETRO_CORE
+    if (g_yuv_lifecycle_mutex) SDL_UnlockMutex(g_yuv_lifecycle_mutex);
+#endif
 }
 
 static void vid_flash_yuv_surface()
@@ -1988,8 +2179,9 @@ static void vid_blank_yuv_surface()
     memset(g_yuv_surface->Vplane, V_value, g_yuv_surface->Vsize);
 }
 
+#ifndef LIBRETRO_CORE
 static void vid_blank_yuv_texture()
- {
+{
     if (!g_yuv_texture) return;
 
     float w, h;
@@ -2017,6 +2209,7 @@ static void vid_blank_yuv_texture()
     free(u_plane);
     free(v_plane);
 }
+#endif /* !LIBRETRO_CORE */
 
 static inline void blendPlane(const uint8_t *src, uint8_t *dst, int w, int h,
 	int srcPitch, int dstPitch)
@@ -2052,10 +2245,14 @@ static inline void lumaControl(const uint8_t *src, uint8_t *dst, int width, int 
     }
 }
 
+#ifndef LIBRETRO_CORE
 static SDL_Texture *vid_create_yuv_texture(int width, int height)
 {
     g_yuv_texture = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_YV12,
         g_texture_access, width, height);
+    if (!g_yuv_texture) {
+        LOGE << fmt("vid_create_yuv_texture failed (%dx%d): %s", width, height, SDL_GetError());
+    }
 
     g_yuv_skip = true;
 
@@ -2070,6 +2267,7 @@ static SDL_Texture *vid_create_yuv_texture(int width, int height)
 
     return g_yuv_texture;
 }
+#endif /* !LIBRETRO_CORE */
 
 // REMEMBER it updates the YUV surface ONLY: the YUV texture is updated on vid_blit().
 int vid_update_yuv_overlay(uint8_t *Yplane, uint8_t *Uplane, uint8_t *Vplane,
@@ -2389,9 +2587,94 @@ void vid_blit()
     // and is recommended by SDL_Rendercopy() documentation.
 
     SDL_SetRenderTarget(g_renderer, g_mix_texture);
+#ifndef LIBRETRO_CORE
     SDL_RenderClear(g_renderer);
+#endif
 
-    // Does YUV texture need update from the YUV surface
+    // Does YUV texture need update from the YUV "surface"?
+    // Don't try if the vldp object didn't call setup_yuv_surface (in noldp mode)
+#ifdef LIBRETRO_CORE
+    /* Convert YUV→ARGB8888 manually: SDL software renderer YUV blit is broken
+     * on V3D/Mesa (black output). g_lr_surface is ARGB8888 so alpha compositing
+     * below correctly skips transparent overlay pixels. */
+    if (g_yuv_lifecycle_mutex) SDL_LockMutex(g_yuv_lifecycle_mutex);
+    if (g_yuv_surface && g_lr_surface) {
+        SDL_LockMutex(g_yuv_surface->mutex);
+        if (g_yuv_video_needs_update) {
+            g_yuv_video_needs_update = false;
+
+            int bw = g_yuv_surface->width, bh = g_yuv_surface->height;
+
+            if (g_yuv_skip) {
+                if (g_yuv_display == YUV_VISIBLE) g_yuv_skip = false;
+                /* Write blank colour directly into the render surface. */
+                size_t frame_bytes = (size_t)g_lr_surface->pitch * g_lr_surface->h;
+                if (g_yuv_blue) {
+                    uint32_t blue = 0x000000FFu;
+                    uint32_t *p = reinterpret_cast<uint32_t *>(g_lr_surface->pixels);
+                    for (size_t i = 0; i < frame_bytes / 4; ++i) p[i] = blue;
+                } else {
+                    memset(g_lr_surface->pixels, 0, frame_bytes);
+                }
+            } else {
+                /* Pack separate Y/V/U planes into contiguous YV12 for
+                 * SDL_ConvertPixels, convert to a scratch ARGB buffer sized
+                 * to the YUV dims, then nearest-neighbour scale into
+                 * g_lr_surface at g_scaling_rect. */
+                int uv_sz = (bw / 2) * (bh / 2);
+                int pneed  = bw * bh + 2 * uv_sz;
+                if (pneed > g_yuv_packed_size) {
+                    delete[] g_yuv_packed_buf;
+                    g_yuv_packed_buf  = new uint8_t[pneed];
+                    g_yuv_packed_size = pneed;
+                }
+                memcpy(g_yuv_packed_buf,                  g_yuv_surface->Yplane, (size_t)(bw * bh));
+                memcpy(g_yuv_packed_buf + bw * bh,         g_yuv_surface->Vplane, (size_t)uv_sz);
+                memcpy(g_yuv_packed_buf + bw * bh + uv_sz, g_yuv_surface->Uplane, (size_t)uv_sz);
+
+                int argb_need = bw * bh;
+                if (argb_need > g_yuv_argb_size) {
+                    delete[] g_yuv_argb_buf;
+                    g_yuv_argb_buf  = new uint32_t[argb_need];
+                    g_yuv_argb_size = argb_need;
+                }
+                SDL_ConvertPixels(bw, bh,
+                    SDL_PIXELFORMAT_YV12,     g_yuv_packed_buf, bw,
+                    SDL_PIXELFORMAT_ARGB8888, g_yuv_argb_buf,   bw * 4);
+
+                /* Nearest-neighbour scale into g_lr_surface at g_scaling_rect.
+                 * Do not clear the surface — the overlay is composited on top
+                 * every frame and must survive across YUV updates. */
+                uint32_t *dst     = (uint32_t *)g_lr_surface->pixels;
+                int       dst_str = g_lr_surface->pitch / 4;
+                int       vw      = g_lr_surface->w;
+                int       vh      = g_lr_surface->h;
+
+                int dx0 = g_scaling_rect.x, dy0 = g_scaling_rect.y;
+                int dw  = g_scaling_rect.w, dh  = g_scaling_rect.h;
+                if (dw <= 0 || dh <= 0) { dx0 = 0; dy0 = 0; dw = vw; dh = vh; }
+
+                int dx_start = std::max(0, -dx0);
+                int dx_end   = std::min(dw, vw - dx0);
+                int dy_start = std::max(0, -dy0);
+                int dy_end   = std::min(dh, vh - dy0);
+                for (int dy = dy_start; dy < dy_end; ++dy) {
+                    int sy = (dy * bh) / dh;
+                    const uint32_t *row_src = &g_yuv_argb_buf[sy * bw];
+                    uint32_t       *row_dst = &dst[(dy0 + dy) * dst_str + dx0];
+                    for (int dx = dx_start; dx < dx_end; ++dx) {
+                        int sx = (dx * bw) / dw;
+                        row_dst[dx] = row_src[sx];
+                    }
+                }
+            }
+        }
+        SDL_UnlockMutex(g_yuv_surface->mutex);
+    }
+    if (g_yuv_lifecycle_mutex) SDL_UnlockMutex(g_yuv_lifecycle_mutex);
+
+#else  /* !LIBRETRO_CORE — original texture-based path */
+
     if (g_yuv_surface) {
 
         SDL_LockMutex(g_yuv_surface->mutex);
@@ -2420,7 +2703,9 @@ void vid_blit()
 
         SDL_UnlockMutex(g_yuv_surface->mutex);
     }
+#endif /* LIBRETRO_CORE */
 
+#ifndef LIBRETRO_CORE
     // Does OVERLAY texture need update from the local surfaces
     if (m_block_driver_overlay) {
         SDL_UpdateTexture(g_overlay_texture, &g_local_size_rect,
@@ -2437,6 +2722,94 @@ void vid_blit()
         SDL_RectToFRect(&g_limit_rect, &frect);
         SDL_RenderTexture(g_renderer, g_overlay_texture, &frect, &fScaleRect);
     }
+#else
+    /* Composite overlay surfaces onto g_lr_surface.
+     * Overlay src is RGBA8888 (A=low byte); dst is ARGB8888 (A=high byte). */
+    if (g_lr_surface) {
+        uint32_t *dst       = (uint32_t *)g_lr_surface->pixels;
+        int       dst_str   = g_lr_surface->pitch / 4;
+        int       vw        = g_lr_surface->w;
+        int       vh        = g_lr_surface->h;
+        int       dx0       = g_scaling_rect.x;
+        int       dy0       = g_scaling_rect.y;
+        int       dw        = g_scaling_rect.w;
+        int       dh        = g_scaling_rect.h;
+
+        auto composite_src = [&](const SDL_Surface *surf, const SDL_Rect *src_rect) {
+            if (!surf || !src_rect) return;
+            const uint32_t *src = (const uint32_t *)surf->pixels;
+            int src_str = surf->pitch / 4;
+            int sw = src_rect->w, sh = src_rect->h;
+            int sx0 = src_rect->x, sy0 = src_rect->y;
+            /* Precompute valid horizontal pixel range — avoids a branch per pixel. */
+            int dx_start = std::max(0, -dx0);
+            int dx_end   = std::min(dw, vw - dx0);
+            if (dx_start >= dx_end) return;
+            /* Bresenham initial state for sx at dx = dx_start (one-time division). */
+            int sx_init     = sx0 + (dx_start * sw) / dw;
+            int sx_err_init = (dx_start * sw) % dw;
+            for (int dy = 0; dy < dh; ++dy) {
+                int sy   = sy0 + (dy * sh) / dh;
+                int ydst = dy0 + dy;
+                if (ydst < 0 || ydst >= vh) continue;
+                int sx_cur = sx_init;
+                int sx_err = sx_err_init;
+                uint32_t       *row_dst = &dst[ydst * dst_str];
+                const uint32_t *row_src = &src[sy * src_str];
+                for (int dx = dx_start; dx < dx_end; ++dx) {
+                    uint32_t sp = row_src[sx_cur]; /* RGBA8888 */
+                    uint8_t  sa = sp & 0xFFu;      /* A = low byte */
+                    if (sa != 0) {
+                        uint8_t sr = (sp >> 24) & 0xFFu;
+                        uint8_t sg = (sp >> 16) & 0xFFu;
+                        uint8_t sb = (sp >>  8) & 0xFFu;
+                        uint32_t *dp = &row_dst[dx0 + dx];
+                        if (sa == 255u) {
+                            *dp = 0xFF000000u | ((uint32_t)sr << 16) | ((uint32_t)sg << 8) | sb;
+                        } else {
+                            uint32_t ia = 255u - sa;
+                            uint8_t r  = (uint8_t)(((uint32_t)sr * sa + ((*dp >> 16) & 0xFFu) * ia + 127u) / 255u);
+                            uint8_t gc = (uint8_t)(((uint32_t)sg * sa + ((*dp >>  8) & 0xFFu) * ia + 127u) / 255u);
+                            uint8_t b  = (uint8_t)(((uint32_t)sb * sa + ( *dp        & 0xFFu) * ia + 127u) / 255u);
+                            *dp = 0xFF000000u | ((uint32_t)r << 16) | ((uint32_t)gc << 8) | b;
+                        }
+                    }
+                    /* Bresenham step: advance sx_cur without division */
+                    sx_err += sw;
+                    if (sx_err >= dw) { sx_cur++; sx_err -= dw; }
+                }
+            }
+        };
+
+        /* Scoreboard: g_blit_surface is fully-transparent when empty → no-op. */
+        if (g_lr_scoreboard_visible && g_blit_surface)
+            composite_src(g_blit_surface, &g_local_size_rect);
+
+        /* Always composite the overlay (not just when it changed): the YUV
+         * scaling loop overwrites the entire g_scaling_rect area each frame,
+         * so the overlay must be redrawn on top every frame regardless of
+         * whether it changed.  g_overlay_surface is fully transparent when
+         * empty so this is a no-op when there is nothing to show.
+         *
+         * Use g_overlay_surface dimensions for the src rect instead of a fixed
+         * 320×240 rect: the overlay may be narrower (e.g. 256×240 for Mach3),
+         * causing an out-of-bounds read and wrong scaling.  Preserve the y
+         * offset from g_limit_rect for games that use set_overlay_offset. */
+        if (g_overlay_surface) {
+            SDL_Rect overlay_src = {
+                0,
+                g_limit_rect.y,
+                g_overlay_surface->w,
+                g_overlay_surface->h - g_limit_rect.y
+            };
+            composite_src(g_overlay_surface, &overlay_src);
+        }
+    }
+#endif
+
+#ifdef LIBRETRO_CORE
+    if (g_frame_ready_hook) g_frame_ready_hook();
+#endif
 
     if (g_aux_needs_update) vid_render_aux();
 

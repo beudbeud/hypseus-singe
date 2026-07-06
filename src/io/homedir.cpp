@@ -161,11 +161,14 @@ void homedir::create_dirs(const string &s) {
     for (size_t i = 0; i < p.length(); i++) {
         if (p[i] == '/') {
             string sub = p.substr(0, i);
+            if (sub.empty()) continue; /* leading slash on absolute paths */
             if (!mpo_file_exists(sub.c_str())) {
-                if (m_ramdir.empty()) {
-                    make_dir(m_homedir + "/" + sub);
-                } else {
+                /* If sub is absolute or m_ramdir was set explicitly, use it
+                 * as-is.  Otherwise prefix with m_homedir (relative-path case). */
+                if (!m_ramdir.empty() || sub[0] == '/') {
                     make_dir(sub);
+                } else {
+                    make_dir(m_homedir + "/" + sub);
                 }
             }
         }

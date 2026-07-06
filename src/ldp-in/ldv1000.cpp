@@ -175,7 +175,6 @@ int stack_push(unsigned char value)
 // sends a byte to our virtual LD-V1000
 void write(unsigned char value)
 {
-
     char s[81] = {0};
     //	char f[81] = { 0 };
     Uint16 curframe = 0; // current frame we're on

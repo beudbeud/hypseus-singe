@@ -173,6 +173,8 @@ class ldp_vldp : public ldp
     void disable_audio1();
     void disable_audio2();
     bool switch_altaudio(const char *);
+    void audio_pause_menu() override;
+    void audio_resume_menu() override;
 
   private:
     void set_audiocopy_callback();
@@ -200,5 +202,11 @@ void blank_overlay();
 void ldp_vldp_audio_callback(Uint8 *stream, int len,
                              int unused); // declaration for callback in other
                                           // function
+
+// Register a callback that is invoked at the start of every audio_play()
+// (i.e. after each disc seek when OGG playback resumes).  Used by the
+// libretro core to flush stale silence from its audio ring buffer so the
+// ring does not inject a ~50 ms audio lag after every seek.
+void ldp_vldp_set_audio_play_hook(void (*hook)());
 
 #endif

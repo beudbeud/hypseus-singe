@@ -227,7 +227,7 @@ void del_all()
 {
 	struct def *cur = g_head;
 	struct def *tmp = NULL;
-	
+
 	// while we have cpu's left to delete
 	while (cur)
 	{
@@ -237,7 +237,7 @@ void del_all()
 	}
 	g_head = NULL;
 	g_count = 0;
-
+	memset(g_initialized, 0, sizeof(g_initialized));
 }
 
 // recalculations all expensive calculations

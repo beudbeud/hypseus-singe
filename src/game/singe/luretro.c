@@ -141,7 +141,7 @@ void lua_espath(const char *src, char *dst, int dstsize)
                     SAFE_APPEND_CH('/');
                     break;
                 default:
-#ifdef ABSTRACT_SINGE
+#if defined(ABSTRACT_SINGE) && !defined(LIBRETRO_CORE)
                     SAFE_APPEND_STR(".hypseus/");
 #else
                     SAFE_APPEND_STR(".daphne/");

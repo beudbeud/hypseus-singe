@@ -68,6 +68,13 @@ typedef void *(*audiocopyproc)(void *dest, const void *src, size_t bytes_to_copy
 audiocopyproc paudiocopy = memcpy; // pointer to the audio copy procedure
                                    // (defaults to memcpy)
 
+static void (*s_audio_play_hook)() = nullptr;
+
+void ldp_vldp_set_audio_play_hook(void (*hook)())
+{
+    s_audio_play_hook = hook;
+}
+
 SDL_Mutex *g_ogg_mutex   = NULL;
 mpo_io *g_pIOAudioHandle = NULL;
 OggVorbis_File s_ogg;
@@ -517,6 +524,12 @@ void ldp_vldp::audio_play(Uint32 timer)
     g_samples_played = 0;
     g_audio_playing  = true;
     OGG_UNLOCK;
+
+    // Flush any silence that accumulated in the libretro audio ring during
+    // the preceding seek/pause so it does not reach RetroArch before the
+    // real OGG samples, which would cause a ~50 ms audio lag after seeks.
+    if (s_audio_play_hook)
+        s_audio_play_hook();
 }
 
 // pauses the audio at the current position
@@ -524,6 +537,27 @@ void ldp_vldp::audio_pause()
 {
     OGG_LOCK;
     g_audio_playing = false;
+    OGG_UNLOCK;
+}
+
+// Stops OGG from advancing during a frontend menu pause.
+// Unlike audio_pause(), this does not disturb g_playing_timer / g_samples_played
+// so the sync state is still valid when audio_resume_menu() is called.
+void ldp_vldp::audio_pause_menu()
+{
+    OGG_LOCK;
+    g_audio_playing = false;
+    OGG_UNLOCK;
+}
+
+// Resumes OGG playback from the exact position it was paused at.
+// g_playing_timer and g_samples_played are intentionally left unchanged so
+// the catch-up logic in the callback does not skip audio on resume.
+void ldp_vldp::audio_resume_menu()
+{
+    OGG_LOCK;
+    if (g_audio_ready)
+        g_audio_playing = true;
     OGG_UNLOCK;
 }
 

@@ -269,6 +269,11 @@ bool ldp::pre_search(const char *pszFrame, bool block_until_search_finishes)
                         break;
                     }
 
+                    if (get_quitflag()) {
+                        ldp_stat = LDP_ERROR;
+                        break;
+                    }
+
                     // Since the cpu is paused, we should not use think_delay
                     // Also, blocking seeking may be used for skipping in noldp
                     // mode for cpu games like super don,

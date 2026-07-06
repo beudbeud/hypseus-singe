@@ -239,6 +239,11 @@ class game
                                                       // to see if there is a
                                                       // game-specific option to
                                                       // be parsed
+
+#ifdef LIBRETRO_CORE
+    virtual size_t serialize_lua_state(uint8_t *, size_t) { return 0; }
+    virtual bool   unserialize_lua_state(const uint8_t *, size_t) { return false; }
+#endif
     void disable_crc();       // skips CRC check on ROM load
     virtual bool load_roms(); // load roms into memory
     bool verify_required_file(const char *filename, const char *gamedir,

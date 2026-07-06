@@ -23,6 +23,10 @@
 #include "singeproxy.h"
 #include "singe_interface.h"
 
+#ifdef LIBRETRO_CORE
+#include "../../hypseus.h"
+#endif
+
 #include "../../video/video.h"
 #include "../../video/palette.h"
 #include "../../sound/sound.h"
@@ -90,6 +94,9 @@ typedef struct m_spriteType {
 	bool    animating = false;
 	int     last = 0;
 	int     ticks = 0;
+#ifdef LIBRETRO_CORE
+	std::string path; /* file path used to load (empty for non-file sprites) */
+#endif
 } m_spriteT;
 
 typedef struct g_positionType {
@@ -134,6 +141,18 @@ static unsigned int *g_se_uDiscFPKS;
 // used to know whether try to shutdown lua would crash
 static bool g_bLuaInitialized                      = false;
 static bool m_se_grunt                             = true;
+
+#ifdef LIBRETRO_CORE
+static bool g_se_lua_aborting = false;
+
+static void lua_quit_hook(lua_State *L, lua_Debug *)
+{
+    if (get_quitflag()) {
+        g_se_lua_aborting = true;
+        luaL_error(L, "hypseus shutdown");
+    }
+}
+#endif
 
 // Communications from the DLL to and from Hypseus
 struct       singe_out_info  g_SingeOut;
@@ -200,6 +219,13 @@ int (*g_original_prepare_frame)(uint8_t *Yplane, uint8_t *Uplane, uint8_t *Vplan
 
 extern "C"
 {
+#ifdef LIBRETRO_CORE
+static size_t sep_serialize_lua(uint8_t *buf, size_t max);
+static bool   sep_unserialize_lua(const uint8_t *buf, size_t size);
+static void   sep_reload_resources(void);
+static void   sep_sprite_reload_path(const std::string &path, int frames);
+#endif
+
 SINGE_EXPORT const struct singe_out_info *singeproxy_init(const struct singe_in_info *in_info)
 {
     const struct singe_out_info *result = NULL;
@@ -227,6 +253,12 @@ SINGE_EXPORT const struct singe_out_info *singeproxy_init(const struct singe_in_
     g_SingeOut.sep_keyboard_set_state  = sep_keyboard_set_state;
     g_SingeOut.sep_controller_set_axis = sep_controller_set_axis;
     g_SingeOut.sep_enable_trace        = sep_enable_trace;
+
+#ifdef LIBRETRO_CORE
+    g_SingeOut.sep_serialize_lua       = sep_serialize_lua;
+    g_SingeOut.sep_unserialize_lua     = sep_unserialize_lua;
+    g_SingeOut.sep_reload_resources    = sep_reload_resources;
+#endif
 
     result = &g_SingeOut;
 
@@ -551,6 +583,9 @@ void sep_call_lua(const char *func, const char *sig, ...)
     /* do the call */
     popCount = nres = strlen(sig);  /* number of expected results */
     if (lua_pcall(g_se_lua_context, narg, nres, 0) != 0) { /* do the call */
+#ifdef LIBRETRO_CORE
+        if (g_se_lua_aborting) { lua_settop(g_se_lua_context, top); va_end(vl); return; }
+#endif
         sep_trace(g_se_lua_context);
         LOGE << sep_fmt("error running function '%s': %s", func, lua_tostring(g_se_lua_context, -1));
         if (err > 0) {
@@ -636,12 +671,14 @@ void sep_do_mouse_move(Uint16 x, Uint16 y, Sint16 xrel, Sint16 yrel, Sint8 mouse
     m_tract.mouseX[rID] = x1;
     m_tract.mouseY[rID] = y1;
 
-    // Not sure what's wrong here. I think things are getting started before Singe is ready.
+    /* Skip the Lua callback on the very first call — Singe may not be fully
+     * ready yet — but always update the position so mouseGetPosition() works
+     * correctly from the first shot. */
     if (!debounced) {
         debounced = true;
         return;
     }
-	
+
     sep_call_lua("onMouseMoved", "iiiii", x1, y1, xr, yr, mID);
 }
 
@@ -913,6 +950,348 @@ static void sep_unload_sprites(void)
       m_sprites.clear();
    }
 }
+
+#ifdef LIBRETRO_CORE
+/* Reset per-session resource-load guards so that the next spriteLoad/soundLoad/
+ * fontLoad call resets each resource vector to index-0.  Called before re-running
+ * onLoad during savestate restore so sprites/sounds are reloaded with the same
+ * IDs as the original run. */
+static void sep_reload_resources(void)
+{
+    m_firstload = true;
+    m_firstsnd  = true;
+    m_firstfont = true;
+}
+
+static void sep_sprite_reset();
+static SDL_Surface* sep_surface_zip(std::string s);
+static IMG_Animation* sep_animation_zip(std::string s);
+
+/* Reload a sprite from its original file path into m_sprites without touching
+ * m_firstload.  Used during savestate restore to reconstruct the sprite table.
+ * If path is empty (data sprite) or loading fails, pushes an empty placeholder
+ * so that all subsequent sprite IDs remain valid. */
+static void sep_sprite_reload_path(const std::string &path, int frames)
+{
+    m_spriteT sprite;
+    sprite.scaleX = 1.0;
+    sprite.scaleY = 1.0;
+    sprite.frame = nullptr;
+    sprite.animation = nullptr;
+
+    if (!path.empty()) {
+        SDL_Surface *raw = nullptr;
+        if (frames > 0) {
+            raw = m_rom_zip ? sep_surface_zip(path) : IMG_Load(path.c_str());
+        } else {
+            IMG_Animation *anim = m_rom_zip ? sep_animation_zip(path) : IMG_LoadAnimation(path.c_str());
+            if (anim) {
+                if (anim->count < 2) {
+                    IMG_FreeAnimation(anim);
+                    raw = m_rom_zip ? sep_surface_zip(path) : IMG_Load(path.c_str());
+                } else {
+                    if (m_colorkey) {
+                        for (int x = 0; x < anim->count; x++)
+                            SDL_SetSurfaceColorKey(anim->frames[x], true, 0x0);
+                    }
+                    sprite.present = sep_copy_surface(anim->frames[0], nullptr);
+                    sprite.store   = sep_copy_surface(sprite.present, nullptr);
+                    sprite.animation = anim;
+                    sprite.gfx  = true;
+                    if (!m_colorkey) sprite.nokey = true;
+                    sprite.path = path;
+                    m_sprites.push_back(sprite);
+                    return;
+                }
+            }
+        }
+
+        if (raw) {
+            SDL_Surface *convert = g_se_surface ?
+                SDL_ConvertSurface(raw, g_se_surface->format) : raw;
+            if (convert != raw) SDL_DestroySurface(raw);
+            if (convert) {
+                SDL_SetSurfaceRLE(convert, true);
+                if (m_colorkey) SDL_SetSurfaceColorKey(convert, true, 0x0);
+                sprite.store   = sep_copy_surface(convert, nullptr);
+                sprite.present = convert;
+                sprite.gfx     = true;
+                if (!m_colorkey) sprite.nokey = true;
+                if (frames > 0) {
+                    sprite.frames = frames;
+                    sprite.fwidth = convert->w / frames;
+                }
+                sprite.path = path;
+                m_sprites.push_back(sprite);
+                return;
+            }
+        }
+    }
+    /* placeholder: empty sprite keeps IDs aligned */
+    m_sprites.push_back(sprite);
+}
+
+/* Lua global state serialization — saves/restores number, bool, string globals
+ * and tables up to 3 levels deep.  Covers all FMV game state machines. */
+
+#define LSNG_MAGIC 0x4C534E47u
+enum { LSNG_BOOL=1, LSNG_NUM=2, LSNG_STR=3, LSNG_TABLE=4 };
+
+static void lsw8(uint8_t **p, uint8_t v)   { **p=v; (*p)++; }
+static void lsw16(uint8_t **p, uint16_t v) { memcpy(*p,&v,2); *p+=2; }
+static void lsw32(uint8_t **p, uint32_t v) { memcpy(*p,&v,4); *p+=4; }
+static void lswf64(uint8_t **p, double v)  { memcpy(*p,&v,8); *p+=8; }
+
+static uint8_t  lsr8(const uint8_t **p,const uint8_t *e) { return *p<e?*(*p)++:0; }
+static uint16_t lsr16(const uint8_t **p,const uint8_t *e){ if(*p+2>e)return 0; uint16_t v; memcpy(&v,*p,2); *p+=2; return v; }
+static uint32_t lsr32(const uint8_t **p,const uint8_t *e){ if(*p+4>e)return 0; uint32_t v; memcpy(&v,*p,4); *p+=4; return v; }
+static double   lsrf64(const uint8_t **p,const uint8_t *e){ if(*p+8>e)return 0.0; double v; memcpy(&v,*p,8); *p+=8; return v; }
+
+static bool lsng_is_builtin(const char *key, size_t kl)
+{
+    static const char *builtins[] = {
+        "_G", "_VERSION",
+        "assert", "collectgarbage", "coroutine", "debug", "dofile", "error",
+        "gcinfo", "getfenv", "getmetatable", "io", "ipairs", "load",
+        "loadfile", "loadstring", "math", "module", "newproxy", "next", "os",
+        "package", "pairs", "pcall", "print", "rawequal", "rawget", "rawset",
+        "require", "select", "setfenv", "setmetatable", "string", "table",
+        "tonumber", "tostring", "type", "unpack", "xpcall", nullptr
+    };
+    for (int i = 0; builtins[i]; i++) {
+        size_t bl = strlen(builtins[i]);
+        if (bl == kl && memcmp(builtins[i], key, kl) == 0) return true;
+    }
+    return false;
+}
+
+static uint32_t lsng_write_value(lua_State *L, int vidx, uint8_t **p, const uint8_t *end, int depth)
+{
+    if (depth > 3) return 0;
+    int vtype = lua_type(L, vidx);
+    if (vtype == LUA_TBOOLEAN && *p+2 < end) {
+        lsw8(p, LSNG_BOOL); lsw8(p, lua_toboolean(L,vidx)?1:0); return 1;
+    } else if (vtype == LUA_TNUMBER && *p+9 < end) {
+        lsw8(p, LSNG_NUM); lswf64(p, lua_tonumber(L,vidx)); return 1;
+    } else if (vtype == LUA_TSTRING) {
+        size_t vl; const char *vs = lua_tolstring(L,vidx,&vl);
+        if (vs && vl<=512 && *p+vl+3 < end) {
+            lsw8(p, LSNG_STR); lsw16(p,(uint16_t)vl); memcpy(*p,vs,vl); *p+=vl; return 1;
+        }
+    } else if (vtype == LUA_TTABLE && depth < 3) {
+        uint8_t *tstart = *p;
+        lsw8(p, LSNG_TABLE);
+        uint8_t *cnt_ptr = *p; lsw32(p, 0);
+        uint32_t cnt = 0;
+        lua_pushnil(L);
+        while (lua_next(L,-2)) {
+            /* lua_next already pushed key+value; check buffer AFTER push so we
+             * can pop cleanly before breaking — avoids leaving items on the
+             * stack that would corrupt the caller's lua_next iteration. */
+            if (*p >= end-32) { lua_pop(L, 2); break; }
+            int ktype = lua_type(L,-2);
+            uint8_t *entry_start = *p;
+            bool ok = false;
+            if (ktype == LUA_TNUMBER) {
+                lsw8(p, LSNG_NUM); lswf64(p, lua_tonumber(L,-2));
+                ok = lsng_write_value(L,-1,p,end,depth+1) != 0;
+            } else if (ktype == LUA_TSTRING) {
+                size_t kl; const char *ks = lua_tolstring(L,-2,&kl);
+                if (ks && kl<=255 && *p+kl+3 < end) {
+                    lsw8(p, LSNG_STR); lsw16(p,(uint16_t)kl); memcpy(*p,ks,kl); *p+=kl;
+                    ok = lsng_write_value(L,-1,p,end,depth+1) != 0;
+                }
+            }
+            if (ok) { cnt++; } else { *p = entry_start; }
+            lua_pop(L,1);
+        }
+        memcpy(cnt_ptr, &cnt, 4);
+        if (cnt == 0) { *p = tstart; return 0; }
+        return 1;
+    }
+    return 0;
+}
+
+size_t sep_serialize_lua(uint8_t *buf, size_t max)
+{
+    if (!g_bLuaInitialized || !g_se_lua_context || max < 16) return 0;
+    lua_State *L = g_se_lua_context;
+    uint8_t *p = buf, *end = buf+max;
+
+    /* Sprite list: [count:u32][for each: frames:s32 + pathlen:u16 + path] */
+    uint32_t spcount = (uint32_t)m_sprites.size();
+    lsw32(&p, spcount);
+    for (uint32_t i = 0; i < spcount && p < end-8; i++) {
+        int32_t fr = m_sprites[i].frames;
+        lsw32(&p, (uint32_t)(int32_t)fr);
+        const std::string &sp = m_sprites[i].path;
+        uint16_t pl = (uint16_t)(sp.size() <= 0xFFFF ? sp.size() : 0xFFFF);
+        lsw16(&p, pl);
+        if (pl > 0 && p+pl < end) { memcpy(p, sp.c_str(), pl); p += pl; }
+    }
+
+    lsw32(&p, LSNG_MAGIC);
+    uint8_t *cnt_ptr = p; lsw32(&p, 0);
+    uint32_t count = 0;
+
+    lua_getglobal(L, "_G");
+    int gtop = lua_gettop(L);
+    lua_pushnil(L);
+    while (lua_next(L, gtop)) {
+        /* lua_next pushed key+value; check buffer AFTER to allow a clean pop. */
+        if (p >= end-64) { lua_pop(L, 2); break; }
+        if (lua_type(L,-2) != LUA_TSTRING) { lua_pop(L,1); continue; }
+        size_t kl; const char *key = lua_tolstring(L,-2,&kl);
+        if (!key || kl>255 || p+kl+16 > end) { lua_pop(L,1); continue; }
+        if (lsng_is_builtin(key, kl)) { lua_pop(L,1); continue; }
+
+        uint8_t *entry_start = p;
+        lsw8(&p, (uint8_t)kl); memcpy(p, key, kl); p += kl;
+        if (lsng_write_value(L,-1,&p,end,0)) {
+            count++;
+        } else {
+            p = entry_start;
+        }
+        lua_pop(L,1);
+    }
+    lua_pop(L,1); /* pop _G */
+
+    memcpy(cnt_ptr, &count, 4);
+    return (size_t)(p - buf);
+}
+
+/* Merge saved values from src table into dst table in-place.
+ * For table-valued entries: recurse if dst already has a table there.
+ * Non-serializable entries (functions, userdata) already in dst are left untouched.
+ * Uses absolute stack indices so recursive calls don't shift them. */
+static void lsng_apply_table(lua_State *L, int src_abs, int dst_abs, int depth)
+{
+    if (depth > 3) return;
+    lua_pushnil(L);
+    while (lua_next(L, src_abs)) {
+        /* stack: ..., key(-2), value(-1) */
+        if (lua_istable(L, -1)) {
+            lua_pushvalue(L, -2);        /* dup key */
+            lua_rawget(L, dst_abs);      /* push dst[key] */
+            if (lua_istable(L, -1)) {
+                int new_src = lua_gettop(L) - 1; /* value */
+                int new_dst = lua_gettop(L);      /* dst[key] */
+                lsng_apply_table(L, new_src, new_dst, depth + 1);
+                lua_pop(L, 2);           /* pop dst[key] + value */
+            } else {
+                lua_pop(L, 1);           /* pop non-table dst[key] */
+                lua_pushvalue(L, -2);    /* dup key */
+                lua_pushvalue(L, -2);    /* dup value */
+                lua_rawset(L, dst_abs);  /* dst[key] = value */
+                lua_pop(L, 1);           /* pop value */
+            }
+        } else {
+            lua_pushvalue(L, -2);        /* dup key */
+            lua_pushvalue(L, -2);        /* dup value */
+            lua_rawset(L, dst_abs);      /* dst[key] = value */
+            lua_pop(L, 1);               /* pop value */
+        }
+        /* key stays on stack for lua_next */
+    }
+}
+
+/* Reads one value (type byte + data) from buf, pushes it onto the Lua stack.
+ * Returns true on success.  The table case creates a fresh table (does not
+ * look up an existing one) so it is safe to use at any depth. */
+static bool lsng_read_value(lua_State *L, const uint8_t **p, const uint8_t *end, int depth)
+{
+    uint8_t vtype = lsr8(p, end);
+    if (vtype == LSNG_BOOL) {
+        lua_pushboolean(L, lsr8(p,end)); return true;
+    } else if (vtype == LSNG_NUM) {
+        lua_pushnumber(L, lsrf64(p,end)); return true;
+    } else if (vtype == LSNG_STR) {
+        uint16_t vl = lsr16(p,end);
+        if (*p+vl > end) return false;
+        lua_pushlstring(L,(const char*)*p,vl); *p+=vl; return true;
+    } else if (vtype == LSNG_TABLE && depth < 4) {
+        uint32_t tcount = lsr32(p,end);
+        lua_newtable(L);
+        for (uint32_t j = 0; j < tcount && *p < end; j++) {
+            uint8_t ktype = lsr8(p,end);
+            if (ktype == LSNG_NUM) {
+                lua_pushnumber(L, lsrf64(p,end));
+            } else if (ktype == LSNG_STR) {
+                uint16_t kl = lsr16(p,end);
+                if (*p+kl > end) { lua_pop(L,1); return true; }
+                lua_pushlstring(L,(const char*)*p,kl); *p+=kl;
+            } else { return true; }
+            if (lsng_read_value(L,p,end,depth+1)) {
+                lua_rawset(L,-3);
+            } else {
+                lua_pop(L,1); /* pop key */
+                return true;
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
+bool sep_unserialize_lua(const uint8_t *buf, size_t size)
+{
+    if (!g_bLuaInitialized || !g_se_lua_context || size < 8) return false;
+    lua_State *L = g_se_lua_context;
+    const uint8_t *p = buf, *end = buf+size;
+
+    /* Read sprite list and rebuild m_sprites to match the saved IDs */
+    uint32_t spcount = lsr32(&p, end);
+    if (spcount > 0 && spcount <= 4096) {
+        sep_sprite_reset();
+        m_firstload = false;
+        for (uint32_t i = 0; i < spcount && p < end; i++) {
+            int frames  = (int)(int32_t)lsr32(&p, end);
+            uint16_t pl = lsr16(&p, end);
+            std::string path;
+            if (pl > 0 && p+pl <= end) { path.assign((const char*)p, pl); p += pl; }
+            sep_sprite_reload_path(path, frames);
+        }
+    }
+
+    if (lsr32(&p,end) != LSNG_MAGIC) return false;
+    uint32_t count = lsr32(&p,end);
+
+    for (uint32_t i = 0; i < count && p < end; i++) {
+        uint8_t klen = lsr8(&p,end);
+        if (p+klen > end) break;
+        const char *key = (const char*)p; p += klen;
+
+        if (lsng_read_value(L,&p,end,0)) {
+            if (!lsng_is_builtin(key, klen)) {
+                if (lua_istable(L, -1)) {
+                    /* For table globals: merge into existing table to preserve
+                     * function references and avoid stale iterator keys. */
+                    lua_pushlstring(L, key, klen);
+                    lua_rawget(L, LUA_GLOBALSINDEX); /* push existing value */
+                    if (lua_istable(L, -1)) {
+                        int saved  = lua_gettop(L) - 1;
+                        int existing = lua_gettop(L);
+                        lsng_apply_table(L, saved, existing, 0);
+                        lua_pop(L, 2); /* pop existing + saved table */
+                    } else {
+                        lua_pop(L, 1); /* pop nil/non-table */
+                        lua_pushlstring(L, key, klen);
+                        lua_insert(L, -2);
+                        lua_rawset(L, LUA_GLOBALSINDEX);
+                    }
+                } else {
+                    lua_pushlstring(L,key,klen);
+                    lua_insert(L,-2);
+                    lua_rawset(L,LUA_GLOBALSINDEX);
+                }
+            } else {
+                lua_pop(L,1);
+            }
+        }
+    }
+    return true;
+}
+#endif /* LIBRETRO_CORE */
 
 void sep_shutdown(void)
 {
@@ -1673,6 +2052,11 @@ void sep_startup(const char *data)
     g_se_lua_context = lua_open();
     luaL_openlibs(g_se_lua_context);
     lua_atpanic(g_se_lua_context, sep_lua_error);
+
+#ifdef LIBRETRO_CORE
+    g_se_lua_aborting = false;
+    lua_sethook(g_se_lua_context, lua_quit_hook, LUA_MASKCOUNT, 100);
+#endif
 
     lua_register(g_se_lua_context, "colorBackground",        sep_color_set_backcolor);
     lua_register(g_se_lua_context, "colorForeground",        sep_color_set_forecolor);
@@ -3769,6 +4153,9 @@ static int sep_sprite_load(lua_State *L)
 
            if (!m_colorkey) sprite.nokey = true;
 
+#ifdef LIBRETRO_CORE
+           sprite.path = filepath;
+#endif
            m_sprites.push_back(sprite);
            result = m_sprites.size() - 1;
 
@@ -3854,6 +4241,9 @@ static int sep_sprite_loadframes(lua_State *L)
                 sprite.animation = NULL;
                 if (!m_colorkey) sprite.nokey = true;
 
+#ifdef LIBRETRO_CORE
+                sprite.path = filepath;
+#endif
                 m_sprites.push_back(sprite);
                 result = m_sprites.size() - 1;
 
