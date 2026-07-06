@@ -38,7 +38,7 @@ jobs:
           libfreetype-dev libharfbuzz-dev \
           libpng-dev libjpeg-dev libtiff-dev libwebp-dev \
           libx11-dev libxext-dev libxrandr-dev libxcursor-dev \
-          libxi-dev libxfixes-dev libxss-dev libxkbcommon-dev \
+          libxi-dev libxfixes-dev libxss-dev libxtst-dev libxkbcommon-dev \
           libgl1-mesa-dev libasound2-dev \
           autoconf automake libtool
 
