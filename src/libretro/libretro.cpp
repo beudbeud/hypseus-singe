@@ -80,14 +80,14 @@ static retro_log_printf_t          log_cb         = nullptr;
 /* -------------------------------------------------------------------------
  * Video shared state
  * ---------------------------------------------------------------------- */
-static SDL_sem    *s_frame_produced  = nullptr;
-static SDL_sem    *s_frame_consumed  = nullptr;
+static SDL_Semaphore    *s_frame_produced  = nullptr;
+static SDL_Semaphore    *s_frame_consumed  = nullptr;
 static int         s_vid_w          = 640;
 static int         s_vid_h          = 480;
 /* Set by libretro_submit_video() (emu thread) when dimensions change; read
  * and cleared by retro_run() (libretro thread) to issue SET_GEOMETRY before
  * passing the first resized frame to the frontend. */
-static SDL_atomic_t s_geometry_changed = {0};
+static SDL_AtomicInt s_geometry_changed = {0};
 #ifdef DEBUG
 static int          s_pix_logged       = 0; /* debug pixel log counter, reset on resize */
 #endif
@@ -102,7 +102,7 @@ static int16_t    s_audio_ring[AUDIO_RING_CAP];
 static int        s_audio_head  = 0;   /* write index */
 static int        s_audio_tail  = 0;   /* read index */
 static int        s_audio_count = 0;   /* int16_t values available */
-static SDL_mutex *s_audio_mutex = nullptr;
+static SDL_Mutex *s_audio_mutex = nullptr;
 
 /* -------------------------------------------------------------------------
  * Input shared state
@@ -111,7 +111,7 @@ static SDL_mutex *s_audio_mutex = nullptr;
 static uint32_t   s_pad_state  = 0;
 static uint32_t   s_pad_prev   = 0;   /* previous state seen by emu thread */
 static bool       s_pad_synced = false; /* true after first sync to avoid boot spurious press */
-static SDL_mutex *s_input_mutex = nullptr;
+static SDL_Mutex *s_input_mutex = nullptr;
 
 /* Mouse / pointer / lightgun shared state (guarded by s_input_mutex)     */
 static int        s_mouse_x      = 0;   /* absolute screen position       */
@@ -136,7 +136,7 @@ static size_t    s_video_buf_sz = 0;
  * thread (retro_serialize).  A short mutex protects the buffer during the
  * copy; sep_serialize_lua is NEVER called from the frontend thread.
  * ---------------------------------------------------------------------- */
-static SDL_mutex *s_lua_snap_mutex = nullptr;
+static SDL_Mutex *s_lua_snap_mutex = nullptr;
 static uint8_t   s_lua_snap_data[128 * 1024];
 static uint32_t  s_lua_snap_size = 0;
 
@@ -157,8 +157,8 @@ static std::string s_last_game_path;      /* stored for retro_reset() full reloa
  * each singe game-loop iteration; it applies the restore and posts
  * s_restore_done so retro_unserialize() can return.
  * ---------------------------------------------------------------------- */
-static SDL_atomic_t  s_restore_pending  = {0};
-static SDL_sem      *s_restore_done     = nullptr;
+static SDL_AtomicInt  s_restore_pending  = {0};
+static SDL_Semaphore      *s_restore_done     = nullptr;
 static uint32_t      s_restore_frame    = 0;
 static int           s_restore_ldp_stat = 0;
 static uint32_t      s_restore_lua_size = 0;
@@ -170,7 +170,7 @@ static uint8_t       s_restore_lua_data[128 * 1024];
  * Returns true when a restore was performed; the caller should 'continue'. */
 bool libretro_singe_frame_begin()
 {
-    if (!SDL_AtomicGet(&s_restore_pending)) return false;
+    if (!SDL_GetAtomicInt(&s_restore_pending)) return false;
 
     singe *sg = dynamic_cast<singe *>(g_game);
     if (sg && s_restore_lua_size > 0)
@@ -181,8 +181,8 @@ bool libretro_singe_frame_begin()
     if (g_ldp) g_ldp->pre_search(rf, true);
     if (g_ldp && s_restore_ldp_stat == LDP_PLAYING) g_ldp->pre_play();
 
-    SDL_AtomicSet(&s_restore_pending, 0);
-    SDL_SemPost(s_restore_done);
+    SDL_SetAtomicInt(&s_restore_pending, 0);
+    SDL_SignalSemaphore(s_restore_done);
     return true;
 }
 
@@ -321,7 +321,7 @@ void libretro_submit_video()
     if (w != s_vid_w || h != s_vid_h) {
         s_vid_w = w;
         s_vid_h = h;
-        SDL_AtomicSet(&s_geometry_changed, 1);
+        SDL_SetAtomicInt(&s_geometry_changed, 1);
 #ifdef DEBUG
         s_pix_logged = 0;
 #endif
@@ -340,10 +340,10 @@ void libretro_submit_video()
     }
 #endif
 
-    SDL_SemPost(s_frame_produced);
+    SDL_SignalSemaphore(s_frame_produced);
     /* Wait for retro_run() to consume the frame, but don't block forever.
      * If the frontend pauses emulation (menu open), retro_run() stops calling
-     * SDL_SemPost(s_frame_consumed). Without a timeout the emu thread stalls
+     * SDL_SignalSemaphore(s_frame_consumed). Without a timeout the emu thread stalls
      * for the entire menu duration then bursts on resume, causing lag.
      * Pause the CPU timer during the wait so that when the frontend resumes,
      * the CPU timing loop does not try to catch up on the elapsed wall time.
@@ -355,8 +355,8 @@ void libretro_submit_video()
     uint32_t pause_start_ms = SDL_GetTicks();
 
     bool menu_audio_paused = false;
-    while (SDL_SemWaitTimeout(s_frame_consumed, 33) != 0) {
-        if (get_quitflag() || SDL_AtomicGet(&s_restore_pending)) {
+    while (SDL_WaitSemaphoreTimeout(s_frame_consumed, 33) != 0) {
+        if (get_quitflag() || SDL_GetAtomicInt(&s_restore_pending)) {
             if (menu_audio_paused && g_ldp) g_ldp->audio_resume_menu();
             cpu::unpause();
             return;
@@ -1015,19 +1015,16 @@ bool retro_load_game(const struct retro_game_info *info)
     /* 4. Initialise SDL subsystems needed by hypseus                      */
     /* ------------------------------------------------------------------ */
     LR_LOG("SDL_Init");
-    if (SDL_Init(SDL_INIT_NOPARACHUTE) < 0) {
+    if (!SDL_Init(0)) {
         LR_FAIL("SDL_Init"); return false;
     }
-    if (SDL_InitSubSystem(SDL_INIT_TIMER | SDL_INIT_AUDIO) < 0) {
+    if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
         LR_FAIL("SDL_InitSubSystem"); return false;
     }
 
-    int imgflags = IMG_INIT_PNG | IMG_INIT_JPG;
-    if (IMG_Init(imgflags) != imgflags) {
-        LR_FAIL("IMG_Init"); SDL_QuitSubSystem(SDL_INIT_TIMER | SDL_INIT_AUDIO); return false;
-    }
-    if (TTF_Init() != 0) {
-        LR_FAIL("TTF_Init"); IMG_Quit(); SDL_QuitSubSystem(SDL_INIT_TIMER | SDL_INIT_AUDIO); return false;
+    /* SDL3_image needs no IMG_Init; loaders are registered on demand. */
+    if (!TTF_Init()) {
+        LR_FAIL("TTF_Init"); SDL_QuitSubSystem(SDL_INIT_AUDIO); return false;
     }
 
     /* ------------------------------------------------------------------ */
@@ -1036,7 +1033,7 @@ bool retro_load_game(const struct retro_game_info *info)
     LR_LOG("parse_cmd_line");
     if (!parse_cmd_line(argc, argv.data())) {
         LR_FAIL("parse_cmd_line");
-        TTF_Quit(); IMG_Quit(); SDL_QuitSubSystem(SDL_INIT_TIMER | SDL_INIT_AUDIO);
+        TTF_Quit(); SDL_QuitSubSystem(SDL_INIT_AUDIO);
         return false;
     }
 
@@ -1092,7 +1089,7 @@ bool retro_load_game(const struct retro_game_info *info)
     if (!sound::init()) {
         LR_FAIL("sound::init");
         video::free_bmps();
-        TTF_Quit(); IMG_Quit(); SDL_QuitSubSystem(SDL_INIT_TIMER | SDL_INIT_AUDIO);
+        TTF_Quit(); SDL_QuitSubSystem(SDL_INIT_AUDIO);
         return false;
     }
 
@@ -1101,7 +1098,7 @@ bool retro_load_game(const struct retro_game_info *info)
         LR_FAIL("SDL_input_init");
         sound::shutdown();
         video::free_bmps();
-        TTF_Quit(); IMG_Quit(); SDL_QuitSubSystem(SDL_INIT_TIMER | SDL_INIT_AUDIO);
+        TTF_Quit(); SDL_QuitSubSystem(SDL_INIT_AUDIO);
         return false;
     }
 
@@ -1111,7 +1108,7 @@ bool retro_load_game(const struct retro_game_info *info)
         SDL_input_shutdown();
         sound::shutdown();
         video::free_bmps();
-        TTF_Quit(); IMG_Quit(); SDL_QuitSubSystem(SDL_INIT_TIMER | SDL_INIT_AUDIO);
+        TTF_Quit(); SDL_QuitSubSystem(SDL_INIT_AUDIO);
         return false;
     }
 
@@ -1121,7 +1118,7 @@ bool retro_load_game(const struct retro_game_info *info)
         SDL_input_shutdown();
         sound::shutdown();
         video::free_bmps();
-        TTF_Quit(); IMG_Quit(); SDL_QuitSubSystem(SDL_INIT_TIMER | SDL_INIT_AUDIO);
+        TTF_Quit(); SDL_QuitSubSystem(SDL_INIT_AUDIO);
         return false;
     }
 
@@ -1134,7 +1131,7 @@ bool retro_load_game(const struct retro_game_info *info)
         SDL_input_shutdown();
         sound::shutdown();
         video::free_bmps();
-        TTF_Quit(); IMG_Quit(); SDL_QuitSubSystem(SDL_INIT_TIMER | SDL_INIT_AUDIO);
+        TTF_Quit(); SDL_QuitSubSystem(SDL_INIT_AUDIO);
         return false;
     }
 
@@ -1146,7 +1143,7 @@ bool retro_load_game(const struct retro_game_info *info)
         SDL_input_shutdown();
         sound::shutdown();
         video::free_bmps();
-        TTF_Quit(); IMG_Quit(); SDL_QuitSubSystem(SDL_INIT_TIMER | SDL_INIT_AUDIO);
+        TTF_Quit(); SDL_QuitSubSystem(SDL_INIT_AUDIO);
         return false;
     }
     LR_LOG("all init done, starting emu thread");
@@ -1194,13 +1191,13 @@ void retro_unload_game(void)
     set_quitflag();
 
     /* Unblock the emu thread if it is blocked in the restore handshake */
-    if (SDL_AtomicGet(&s_restore_pending)) {
-        SDL_AtomicSet(&s_restore_pending, 0);
-        SDL_SemPost(s_restore_done);
+    if (SDL_GetAtomicInt(&s_restore_pending)) {
+        SDL_SetAtomicInt(&s_restore_pending, 0);
+        SDL_SignalSemaphore(s_restore_done);
     }
 
     /* Unblock the emu thread if it is waiting on s_frame_consumed */
-    if (s_frame_consumed) SDL_SemPost(s_frame_consumed);
+    if (s_frame_consumed) SDL_SignalSemaphore(s_frame_consumed);
 
     /* Wait for the emulation thread to finish */
     int thread_result = 0;
@@ -1210,8 +1207,8 @@ void retro_unload_game(void)
 
     /* Drain semaphore counts left over from the stopped thread so that
      * a subsequent retro_load_game starts with clean synchronisation state. */
-    if (s_frame_produced) while (SDL_SemTryWait(s_frame_produced) == 0) {}
-    if (s_frame_consumed) while (SDL_SemTryWait(s_frame_consumed) == 0) {}
+    if (s_frame_produced) while (SDL_TryWaitSemaphore(s_frame_produced) == 0) {}
+    if (s_frame_consumed) while (SDL_TryWaitSemaphore(s_frame_consumed) == 0) {}
 
     /* Free the video copy buffer; it will be reallocated on next load. */
     delete[] s_video_buf;
@@ -1228,7 +1225,7 @@ void retro_unload_game(void)
     s_mouse_x = s_mouse_y = 0;
     s_mouse_dx = s_mouse_dy = 0;
     s_mouse_moved = false;
-    SDL_AtomicSet(&s_geometry_changed, 0);
+    SDL_SetAtomicInt(&s_geometry_changed, 0);
     if (s_audio_mutex) {
         SDL_LockMutex(s_audio_mutex);
         s_audio_head = s_audio_tail = s_audio_count = 0;
@@ -1250,12 +1247,12 @@ void retro_unload_game(void)
     if (g_ldp)  { delete g_ldp;  g_ldp  = nullptr; }
 
     TTF_Quit();
-    IMG_Quit();
+
     /* Do NOT call SDL_Quit() here: that would destroy the semaphores and
      * mutexes allocated in retro_init(), which are not recreated until
      * retro_deinit()/retro_init() cycle. Quit only the subsystems started
      * in retro_load_game so they can be re-initialised on the next load. */
-    SDL_QuitSubSystem(SDL_INIT_TIMER | SDL_INIT_AUDIO);
+    SDL_QuitSubSystem(SDL_INIT_AUDIO);
 }
 
 void retro_run(void)
@@ -1342,13 +1339,13 @@ void retro_run(void)
     /* ------------------------------------------------------------------
      * 2. Wait for a video frame from the emulation thread (50 ms timeout)
      * ---------------------------------------------------------------- */
-    bool got_frame = (SDL_SemWaitTimeout(s_frame_produced, 50) == 0);
+    bool got_frame = (SDL_WaitSemaphoreTimeout(s_frame_produced, 50) == 0);
 
     /* Notify the frontend of a geometry change before submitting the first
      * frame at the new resolution, so the video driver can resize its
      * buffers before it receives pixel data of unexpected dimensions. */
-    if (SDL_AtomicGet(&s_geometry_changed)) {
-        SDL_AtomicSet(&s_geometry_changed, 0);
+    if (SDL_GetAtomicInt(&s_geometry_changed)) {
+        SDL_SetAtomicInt(&s_geometry_changed, 0);
         struct retro_game_geometry geom;
         geom.base_width   = (unsigned)s_vid_w;
         geom.base_height  = (unsigned)s_vid_h;
@@ -1375,7 +1372,7 @@ void retro_run(void)
             if ((int)lrw != s_vid_w || (int)lrh != s_vid_h) {
                 s_vid_w = (int)lrw;
                 s_vid_h = (int)lrh;
-                SDL_AtomicSet(&s_geometry_changed, 1);
+                SDL_SetAtomicInt(&s_geometry_changed, 1);
             }
             size_t frame_sz = (size_t)lr->pitch * (size_t)lrh;
             if (frame_sz > s_video_buf_sz) {
@@ -1384,10 +1381,10 @@ void retro_run(void)
                 s_video_buf_sz = frame_sz;
             }
             memcpy(s_video_buf, lr->pixels, frame_sz);
-            SDL_SemPost(s_frame_consumed);
+            SDL_SignalSemaphore(s_frame_consumed);
             video_cb(s_video_buf, lrw, lrh, (size_t)lr->pitch);
         } else {
-            SDL_SemPost(s_frame_consumed);
+            SDL_SignalSemaphore(s_frame_consumed);
             video_cb(NULL, (unsigned)s_vid_w, (unsigned)s_vid_h, 0);
         }
     } else {
@@ -1527,8 +1524,8 @@ bool retro_unserialize(const void *data, size_t size)
     s_restore_ldp_stat = ldp_stat;
 
     /* Signal emu thread to do Lua restore + disc seek, then wait for it */
-    SDL_AtomicSet(&s_restore_pending, 1);
-    SDL_SemWait(s_restore_done);
+    SDL_SetAtomicInt(&s_restore_pending, 1);
+    SDL_WaitSemaphore(s_restore_done);
     return true;
 }
 

@@ -965,9 +965,7 @@ static void sep_reload_resources(void)
 
 static void sep_sprite_reset();
 static SDL_Surface* sep_surface_zip(std::string s);
-#if SDL_IMAGE_VERSION_AT_LEAST(2, 6, 0)
 static IMG_Animation* sep_animation_zip(std::string s);
-#endif
 
 /* Reload a sprite from its original file path into m_sprites without touching
  * m_firstload.  Used during savestate restore to reconstruct the sprite table.
@@ -979,16 +977,13 @@ static void sep_sprite_reload_path(const std::string &path, int frames)
     sprite.scaleX = 1.0;
     sprite.scaleY = 1.0;
     sprite.frame = nullptr;
-#if SDL_IMAGE_VERSION_AT_LEAST(2, 6, 0)
     sprite.animation = nullptr;
-#endif
 
     if (!path.empty()) {
         SDL_Surface *raw = nullptr;
         if (frames > 0) {
             raw = m_rom_zip ? sep_surface_zip(path) : IMG_Load(path.c_str());
         } else {
-#if SDL_IMAGE_VERSION_AT_LEAST(2, 6, 0)
             IMG_Animation *anim = m_rom_zip ? sep_animation_zip(path) : IMG_LoadAnimation(path.c_str());
             if (anim) {
                 if (anim->count < 2) {
@@ -1009,14 +1004,11 @@ static void sep_sprite_reload_path(const std::string &path, int frames)
                     return;
                 }
             }
-#else
-            raw = m_rom_zip ? sep_surface_zip(path) : IMG_Load(path.c_str());
-#endif
         }
 
         if (raw) {
             SDL_Surface *convert = g_se_surface ?
-                SDL_ConvertSurface(raw, g_se_surface->format, 0) : raw;
+                SDL_ConvertSurface(raw, g_se_surface->format) : raw;
             if (convert != raw) SDL_DestroySurface(raw);
             if (convert) {
                 SDL_SetSurfaceRLE(convert, true);

@@ -32,24 +32,36 @@ jobs:
       run: |
         sudo apt update
         sudo apt install -y \
-          gcc \
-          libogg-dev \
-          libsdl3-dev \
-          libsdl3-ttf-dev \
-          libsdl3-image-dev \
-          libsdl3-mixer-dev \
-          libzip-dev \
-          libvorbis-dev \
-          zlib1g-dev \
-          autoconf \
-          automake \
-          libtool
+          gcc g++ cmake ninja-build git pkg-config \
+          libogg-dev libvorbis-dev libzip-dev zlib1g-dev \
+          libfreetype-dev libharfbuzz-dev \
+          libpng-dev libjpeg-dev libtiff-dev libwebp-dev \
+          libx11-dev libxext-dev libxrandr-dev libxcursor-dev \
+          libxi-dev libxfixes-dev libwayland-dev libxkbcommon-dev \
+          autoconf automake libtool
+
+    # SDL3 is not packaged in Ubuntu 24.04 (noble) apt; build the stack from
+    # source. SDL core must be installed before its satellite libraries.
+    - name: Build SDL3 from source
+      run: |
+        set -e
+        for repo in SDL SDL_image SDL_ttf SDL_mixer; do
+          git clone --depth 1 https://github.com/libsdl-org/$repo
+          cmake -S $repo -B $repo/_build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr/local \
+            -DBUILD_SHARED_LIBS=ON
+          cmake --build $repo/_build
+          sudo cmake --install $repo/_build
+        done
+        sudo ldconfig
 
     - name: Build
       run: |
         mkdir build
         cd build
         cmake ../src -DLIBRETRO=ON \
+          -DCMAKE_PREFIX_PATH=/usr/local \
           -DCMAKE_C_COMPILER_LAUNCHER=ccache \
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
         make hypseus_singe_libretro -j$(nproc)
