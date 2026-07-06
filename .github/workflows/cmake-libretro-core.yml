@@ -11,6 +11,7 @@ permissions:
 jobs:
   build-linux:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - arch: amd64
@@ -36,12 +37,12 @@ jobs:
           libogg-dev libvorbis-dev libzip-dev zlib1g-dev \
           libfreetype-dev libharfbuzz-dev \
           libpng-dev libjpeg-dev libtiff-dev libwebp-dev \
-          libx11-dev libxext-dev libxrandr-dev libxcursor-dev \
-          libxi-dev libxfixes-dev libwayland-dev libxkbcommon-dev \
           autoconf automake libtool
 
     # SDL3 is not packaged in Ubuntu 24.04 (noble) apt; build the stack from
-    # source. SDL core must be installed before its satellite libraries.
+    # source. The libretro core renders to an off-screen software surface and
+    # never opens a window, so X11/Wayland video drivers are disabled to avoid
+    # their dev-library dependencies. SDL core installs before its satellites.
     - name: Build SDL3 from source
       run: |
         set -e
@@ -50,7 +51,9 @@ jobs:
           cmake -S $repo -B $repo/_build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX=/usr/local \
-            -DBUILD_SHARED_LIBS=ON
+            -DBUILD_SHARED_LIBS=ON \
+            -DSDL_X11=OFF -DSDL_WAYLAND=OFF \
+            -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF
           cmake --build $repo/_build
           sudo cmake --install $repo/_build
         done
@@ -97,10 +100,10 @@ jobs:
           mingw-w64-x86_64-cmake
           mingw-w64-x86_64-gcc
           mingw-w64-x86_64-pkg-config
-          mingw-w64-x86_64-SDL3
-          mingw-w64-x86_64-SDL3_ttf
-          mingw-w64-x86_64-SDL3_image
-          mingw-w64-x86_64-SDL3_mixer
+          mingw-w64-x86_64-sdl3
+          mingw-w64-x86_64-sdl3-ttf
+          mingw-w64-x86_64-sdl3-image
+          mingw-w64-x86_64-sdl3-mixer
           mingw-w64-x86_64-libvorbis
           mingw-w64-x86_64-libogg
           mingw-w64-x86_64-libzip
