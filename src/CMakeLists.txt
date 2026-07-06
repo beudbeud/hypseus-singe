@@ -205,18 +205,12 @@ if(LIBRETRO)
         ${PROJECT_SOURCE_DIR}   # so libretro.cpp can reach "../globals.h" etc.
     )
     target_link_libraries( hypseus_singe_libretro ${HYPSEUS_LINK_LIBS} )
-    # MinGW ld is single-pass: singeproxy.a references Mix_*/IMG_*/TTF_* but
-    # those symbols only land in the undefined list after singeproxy.a is
-    # processed, by which point SDL2_mixer/image/ttf have already been skipped.
-    # Repeating them after HYPSEUS_LINK_LIBS ensures they are seen last.
     if(WIN32)
-        target_link_libraries( hypseus_singe_libretro
-            ${SDL2_MIXER_LIBRARY} ${SDL2_IMAGE_LIBRARY} ${SDL2_TTF_LIBRARY} )
-        # Pull in all transitive static deps of SDL2 and its satellite libs
+        # Pull in all transitive static deps of SDL3 and its satellite libs
         # (freetype, harfbuzz, png, jpeg, mpg123, directx stubs, …).
         # Standard libretro practice: each core is fully self-contained on Windows.
         execute_process(
-            COMMAND pkg-config --libs-only-l --static SDL2 SDL2_ttf SDL2_image SDL2_mixer
+            COMMAND pkg-config --libs-only-l --static sdl3 SDL3_ttf SDL3_image SDL3_mixer
             OUTPUT_VARIABLE _WIN32_STATIC_RAW
             OUTPUT_STRIP_TRAILING_WHITESPACE)
         string(REGEX REPLACE "[ \t]+" ";" _WIN32_STATIC_LIST "${_WIN32_STATIC_RAW}")

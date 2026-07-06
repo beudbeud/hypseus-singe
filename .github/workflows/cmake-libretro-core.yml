@@ -34,10 +34,10 @@ jobs:
         sudo apt install -y \
           gcc \
           libogg-dev \
-          libsdl2-dev \
-          libsdl2-ttf-dev \
-          libsdl2-image-dev \
-          libsdl2-mixer-dev \
+          libsdl3-dev \
+          libsdl3-ttf-dev \
+          libsdl3-image-dev \
+          libsdl3-mixer-dev \
           libzip-dev \
           libvorbis-dev \
           zlib1g-dev \
@@ -85,10 +85,10 @@ jobs:
           mingw-w64-x86_64-cmake
           mingw-w64-x86_64-gcc
           mingw-w64-x86_64-pkg-config
-          mingw-w64-x86_64-SDL2
-          mingw-w64-x86_64-SDL2_ttf
-          mingw-w64-x86_64-SDL2_image
-          mingw-w64-x86_64-SDL2_mixer
+          mingw-w64-x86_64-SDL3
+          mingw-w64-x86_64-SDL3_ttf
+          mingw-w64-x86_64-SDL3_image
+          mingw-w64-x86_64-SDL3_mixer
           mingw-w64-x86_64-libvorbis
           mingw-w64-x86_64-libogg
           mingw-w64-x86_64-libzip
@@ -150,10 +150,10 @@ jobs:
           automake \
           libtool \
           pkg-config \
-          sdl2 \
-          sdl2_ttf \
-          sdl2_image \
-          sdl2_mixer \
+          sdl3 \
+          sdl3_ttf \
+          sdl3_image \
+          sdl3_mixer \
           libvorbis \
           libogg \
           libzip
