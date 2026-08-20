@@ -22,6 +22,7 @@ extern "C" {
 #define RETRO_DEVICE_LIGHTGUN   4
 #define RETRO_DEVICE_ANALOG     5
 #define RETRO_DEVICE_POINTER    6
+#define RETRO_DEVICE_MASK       0xff
 
 /* RetroPad buttons (RETRO_DEVICE_JOYPAD) */
 #define RETRO_DEVICE_ID_JOYPAD_B        0

@@ -119,6 +119,13 @@ static int        s_mouse_y      = 0;
 static Sint16     s_mouse_dx     = 0;   /* relative delta this frame       */
 static Sint16     s_mouse_dy     = 0;
 static bool       s_mouse_moved  = false;
+/* Device selected by the frontend on port 0 (retro_set_controller_port_device).
+ * A real lightgun (GunCon 2 & co) must be read from the lightgun API alone:
+ * mixing in the relative-mouse and pointer fallbacks makes the reticle jump. */
+static unsigned   s_port_device  = RETRO_DEVICE_JOYPAD;
+/* Ignore gun movement below this many pixels: an optical gun always trembles
+ * a couple of pixels around the aim point. 0 = raw. */
+static int        s_gun_deadzone = 2;
 
 /* -------------------------------------------------------------------------
  * Video copy buffer
@@ -259,6 +266,14 @@ static struct retro_core_option_v2_definition k_option_defs[] = {
         nullptr, nullptr, nullptr, nullptr,
         { {"enabled", nullptr}, {"disabled", nullptr}, {nullptr, nullptr} },
         "enabled"
+    },
+    {
+        "hypseus_gun_deadzone",
+        "Lightgun Deadzone (pixels)",
+        nullptr, nullptr, nullptr, nullptr,
+        { {"0", nullptr}, {"1", nullptr}, {"2", nullptr}, {"3", nullptr},
+          {"4", nullptr}, {"6", nullptr}, {"8", nullptr}, {nullptr, nullptr} },
+        "2"
     },
     {
         "hypseus_fullscreen",
@@ -958,6 +973,8 @@ bool retro_load_game(const struct retro_game_info *info)
         if (strcmp(getcore("hypseus_blank_skips"),    "enabled")  == 0) str_args.push_back("-blank_skips");
         if (strcmp(getcore("hypseus_cheat"),          "enabled")  == 0) str_args.push_back("-cheat");
         if (strcmp(getcore("hypseus_crosshair"),      "disabled") == 0) str_args.push_back("-nocrosshair");
+        { const char *dz = getcore("hypseus_gun_deadzone");
+          if (*dz) s_gun_deadzone = atoi(dz); }
 
         /* Force fullscreen: strip -x / -y from .commands and inject -fullscreen. */
         if (strcmp(getcore("hypseus_fullscreen"), "enabled") == 0) {
@@ -1274,6 +1291,14 @@ void retro_run(void)
      * ---------------------------------------------------------------- */
     input_poll_cb();
 
+    /* Live-tunable gun deadzone: a real gun needs calibrating by hand. */
+    bool opt_updated = false;
+    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &opt_updated) && opt_updated) {
+        struct retro_variable var = { "hypseus_gun_deadzone", nullptr };
+        if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+            s_gun_deadzone = atoi(var.value);
+    }
+
     /* Poll lightgun / mouse / pointer buttons BEFORE locking: route them into
      * the joypad state word so they go through the same transition-detection
      * path as regular pad buttons and are never silently dropped. */
@@ -1309,30 +1334,34 @@ void retro_run(void)
         int16_t px  = (int16_t)input_state_cb(0, RETRO_DEVICE_POINTER,  0, RETRO_DEVICE_ID_POINTER_X);
         int16_t py  = (int16_t)input_state_cb(0, RETRO_DEVICE_POINTER,  0, RETRO_DEVICE_ID_POINTER_Y);
 
+        /* Absolute -32767..32767 pair -> screen pixels, with a deadzone. */
+        auto set_abs = [&](int16_t rx, int16_t ry, int dz) -> bool {
+            int nx = std::max(0, std::min(s_vid_w - 1, (int)((rx + 32767) * s_vid_w / 65534)));
+            int ny = std::max(0, std::min(s_vid_h - 1, (int)((ry + 32767) * s_vid_h / 65534)));
+            if (std::abs(nx - s_mouse_x) < dz && std::abs(ny - s_mouse_y) < dz) return false;
+            if (nx == s_mouse_x && ny == s_mouse_y) return false;
+            s_mouse_dx = (Sint16)(nx - s_mouse_x); s_mouse_dy = (Sint16)(ny - s_mouse_y);
+            s_mouse_x = nx; s_mouse_y = ny;
+            return true;
+        };
+
         bool moved = false;
-        if (!lgo) {
-            /* Lightgun on screen: absolute coordinates */
-            int nx = std::max(0, std::min(s_vid_w - 1, (int)((lgx + 32767) * s_vid_w / 65534)));
-            int ny = std::max(0, std::min(s_vid_h - 1, (int)((lgy + 32767) * s_vid_h / 65534)));
-            if (nx != s_mouse_x || ny != s_mouse_y) {
-                s_mouse_dx = (Sint16)(nx - s_mouse_x); s_mouse_dy = (Sint16)(ny - s_mouse_y);
-                s_mouse_x = nx; s_mouse_y = ny; moved = true;
-            }
+        if ((s_port_device & RETRO_DEVICE_MASK) == RETRO_DEVICE_LIGHTGUN) {
+            /* Gun coordinates only. A GunCon-style gun also enumerates as a
+             * mouse, so the pointer/mouse fallbacks report the same aim with a
+             * slightly different scaling and the two sources alternate every
+             * frame — that is what makes the reticle shake and jump. While the
+             * gun is offscreen, hold the last position. */
+            if (!lgo) moved = set_abs(lgx, lgy, s_gun_deadzone);
         } else if (mdx || mdy) {
             /* Relative mouse */
             s_mouse_dx = mdx; s_mouse_dy = mdy;
             s_mouse_x = std::max(0, std::min(s_vid_w - 1, s_mouse_x + mdx));
             s_mouse_y = std::max(0, std::min(s_vid_h - 1, s_mouse_y + mdy));
             moved = true;
-        }
-        /* Pointer absolute — continuous tracking (touchscreen / mouse-as-pointer) */
-        if (!moved && (px || py)) {
-            int nx = std::max(0, std::min(s_vid_w - 1, (int)((px + 32767) * s_vid_w / 65534)));
-            int ny = std::max(0, std::min(s_vid_h - 1, (int)((py + 32767) * s_vid_h / 65534)));
-            if (nx != s_mouse_x || ny != s_mouse_y) {
-                s_mouse_dx = (Sint16)(nx - s_mouse_x); s_mouse_dy = (Sint16)(ny - s_mouse_y);
-                s_mouse_x = nx; s_mouse_y = ny; moved = true;
-            }
+        } else if (px || py) {
+            /* Pointer absolute (touchscreen / mouse-as-pointer) */
+            moved = set_abs(px, py, 0);
         }
         s_mouse_moved = moved;
     }
@@ -1420,7 +1449,10 @@ void retro_reset(void)
     retro_load_game(&info);
 }
 
-void retro_set_controller_port_device(unsigned /*port*/, unsigned /*device*/) {}
+void retro_set_controller_port_device(unsigned port, unsigned device)
+{
+    if (port == 0) s_port_device = device;
+}
 
 /* -------------------------------------------------------------------------
  * Save states
