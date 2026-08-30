@@ -126,6 +126,14 @@ static unsigned   s_port_device  = RETRO_DEVICE_JOYPAD;
 /* Ignore gun movement below this many pixels: an optical gun always trembles
  * a couple of pixels around the aim point. 0 = raw. */
 static int        s_gun_deadzone = 2;
+/* Moving average over the raw absolute samples: an optical gun on an LCD
+ * jitters well past any sane deadzone. 0/1 = off. */
+static int        s_gun_smooth   = 4;
+#define GUN_SMOOTH_MAX 12
+static int32_t    s_gun_hist_x[GUN_SMOOTH_MAX];
+static int32_t    s_gun_hist_y[GUN_SMOOTH_MAX];
+static int        s_gun_hist_n   = 0;   /* samples held */
+static int        s_gun_hist_i   = 0;   /* write cursor */
 
 /* -------------------------------------------------------------------------
  * Video copy buffer
@@ -272,8 +280,17 @@ static struct retro_core_option_v2_definition k_option_defs[] = {
         "Lightgun Deadzone (pixels)",
         nullptr, nullptr, nullptr, nullptr,
         { {"0", nullptr}, {"1", nullptr}, {"2", nullptr}, {"3", nullptr},
-          {"4", nullptr}, {"6", nullptr}, {"8", nullptr}, {nullptr, nullptr} },
+          {"4", nullptr}, {"6", nullptr}, {"8", nullptr}, {"12", nullptr},
+          {"16", nullptr}, {nullptr, nullptr} },
         "2"
+    },
+    {
+        "hypseus_gun_smooth",
+        "Lightgun Smoothing (samples)",
+        nullptr, nullptr, nullptr, nullptr,
+        { {"0", nullptr}, {"2", nullptr}, {"3", nullptr}, {"4", nullptr},
+          {"6", nullptr}, {"8", nullptr}, {"12", nullptr}, {nullptr, nullptr} },
+        "4"
     },
     {
         "hypseus_fullscreen",
@@ -974,7 +991,9 @@ bool retro_load_game(const struct retro_game_info *info)
         if (strcmp(getcore("hypseus_cheat"),          "enabled")  == 0) str_args.push_back("-cheat");
         if (strcmp(getcore("hypseus_crosshair"),      "disabled") == 0) str_args.push_back("-nocrosshair");
         { const char *dz = getcore("hypseus_gun_deadzone");
-          if (*dz) s_gun_deadzone = atoi(dz); }
+          if (*dz) s_gun_deadzone = atoi(dz);
+          const char *sm = getcore("hypseus_gun_smooth");
+          if (*sm) s_gun_smooth = atoi(sm); }
 
         /* Force fullscreen: strip -x / -y from .commands and inject -fullscreen. */
         if (strcmp(getcore("hypseus_fullscreen"), "enabled") == 0) {
@@ -1294,9 +1313,14 @@ void retro_run(void)
     /* Live-tunable gun deadzone: a real gun needs calibrating by hand. */
     bool opt_updated = false;
     if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &opt_updated) && opt_updated) {
-        struct retro_variable var = { "hypseus_gun_deadzone", nullptr };
-        if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
-            s_gun_deadzone = atoi(var.value);
+        struct retro_variable dzv = { "hypseus_gun_deadzone", nullptr };
+        if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &dzv) && dzv.value)
+            s_gun_deadzone = atoi(dzv.value);
+        struct retro_variable smv = { "hypseus_gun_smooth", nullptr };
+        if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &smv) && smv.value) {
+            int n = atoi(smv.value);
+            if (n != s_gun_smooth) { s_gun_smooth = n; s_gun_hist_n = s_gun_hist_i = 0; }
+        }
     }
 
     /* Poll lightgun / mouse / pointer buttons BEFORE locking: route them into
@@ -1334,8 +1358,29 @@ void retro_run(void)
         int16_t px  = (int16_t)input_state_cb(0, RETRO_DEVICE_POINTER,  0, RETRO_DEVICE_ID_POINTER_X);
         int16_t py  = (int16_t)input_state_cb(0, RETRO_DEVICE_POINTER,  0, RETRO_DEVICE_ID_POINTER_Y);
 
-        /* Absolute -32767..32767 pair -> screen pixels, with a deadzone. */
-        auto set_abs = [&](int16_t rx, int16_t ry, int dz) -> bool {
+        /* Absolute -32767..32767 pair -> screen pixels, optionally smoothed
+         * (moving average over the raw samples) then deadzoned. */
+        auto set_abs = [&](int rx, int ry, int dz, int smooth) -> bool {
+            if (smooth > 1) {
+                if (smooth > GUN_SMOOTH_MAX) smooth = GUN_SMOOTH_MAX;
+                /* A deliberate swing to a new target must not be averaged with
+                 * the old one: drop the history past ~6% of the screen. */
+                if (s_gun_hist_n) {
+                    int32_t ax = 0, ay = 0;
+                    for (int i = 0; i < s_gun_hist_n; ++i) { ax += s_gun_hist_x[i]; ay += s_gun_hist_y[i]; }
+                    if (std::abs(rx - ax / s_gun_hist_n) > 4096 ||
+                        std::abs(ry - ay / s_gun_hist_n) > 4096)
+                        s_gun_hist_n = s_gun_hist_i = 0;
+                }
+                s_gun_hist_x[s_gun_hist_i] = rx;
+                s_gun_hist_y[s_gun_hist_i] = ry;
+                s_gun_hist_i = (s_gun_hist_i + 1) % smooth;
+                if (s_gun_hist_n < smooth) ++s_gun_hist_n;
+                int32_t sx = 0, sy = 0;
+                for (int i = 0; i < s_gun_hist_n; ++i) { sx += s_gun_hist_x[i]; sy += s_gun_hist_y[i]; }
+                rx = sx / s_gun_hist_n;
+                ry = sy / s_gun_hist_n;
+            }
             int nx = std::max(0, std::min(s_vid_w - 1, (int)((rx + 32767) * s_vid_w / 65534)));
             int ny = std::max(0, std::min(s_vid_h - 1, (int)((ry + 32767) * s_vid_h / 65534)));
             if (std::abs(nx - s_mouse_x) < dz && std::abs(ny - s_mouse_y) < dz) return false;
@@ -1352,7 +1397,31 @@ void retro_run(void)
              * slightly different scaling and the two sources alternate every
              * frame — that is what makes the reticle shake and jump. While the
              * gun is offscreen, hold the last position. */
-            if (!lgo) moved = set_abs(lgx, lgy, s_gun_deadzone);
+            if (!lgo) moved = set_abs(lgx, lgy, s_gun_deadzone, s_gun_smooth);
+
+            /* Once a second, report how noisy the raw gun really is, so a
+             * shaky reticle can be pinned on the device rather than guessed
+             * at. Visible with RetroArch's verbose logging. */
+            if (log_cb) {
+                static int  n = 0, offs = 0;
+                static int  lo_x = 32767, hi_x = -32768, lo_y = 32767, hi_y = -32768;
+                if (lgo) ++offs;
+                else {
+                    lo_x = std::min(lo_x, (int)lgx); hi_x = std::max(hi_x, (int)lgx);
+                    lo_y = std::min(lo_y, (int)lgy); hi_y = std::max(hi_y, (int)lgy);
+                }
+                if (++n >= 60) {
+                    if (hi_x >= lo_x)
+                        log_cb(RETRO_LOG_DEBUG,
+                               "[hypseus] gun raw spread/s: x=%d y=%d units "
+                               "(%d x %d px), offscreen %d/60 frames\n",
+                               hi_x - lo_x, hi_y - lo_y,
+                               (hi_x - lo_x) * s_vid_w / 65534,
+                               (hi_y - lo_y) * s_vid_h / 65534, offs);
+                    n = offs = 0;
+                    lo_x = lo_y = 32767; hi_x = hi_y = -32768;
+                }
+            }
         } else if (mdx || mdy) {
             /* Relative mouse */
             s_mouse_dx = mdx; s_mouse_dy = mdy;
@@ -1361,7 +1430,7 @@ void retro_run(void)
             moved = true;
         } else if (px || py) {
             /* Pointer absolute (touchscreen / mouse-as-pointer) */
-            moved = set_abs(px, py, 0);
+            moved = set_abs(px, py, 0, 0);
         }
         s_mouse_moved = moved;
     }
@@ -1451,7 +1520,13 @@ void retro_reset(void)
 
 void retro_set_controller_port_device(unsigned port, unsigned device)
 {
-    if (port == 0) s_port_device = device;
+    if (port != 0) return;
+    s_port_device = device;
+    s_gun_hist_n = s_gun_hist_i = 0;
+    if (log_cb)
+        log_cb(RETRO_LOG_INFO, "[hypseus] port 0 device = %u (%s)\n", device,
+               (device & RETRO_DEVICE_MASK) == RETRO_DEVICE_LIGHTGUN
+                   ? "lightgun: gun filter active" : "mouse/pointer path");
 }
 
 /* -------------------------------------------------------------------------
