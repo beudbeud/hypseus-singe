@@ -126,14 +126,28 @@ static unsigned   s_port_device  = RETRO_DEVICE_JOYPAD;
 /* Ignore gun movement below this many pixels: an optical gun always trembles
  * a couple of pixels around the aim point. 0 = raw. */
 static int        s_gun_deadzone = 2;
-/* Moving average over the raw absolute samples: an optical gun on an LCD
- * jitters well past any sane deadzone. 0/1 = off. */
+/* Median filter width over the raw absolute samples: an optical gun jitters
+ * well past any sane deadzone, and loses its lock outright on dark scenes.
+ * 0/1 = off. */
 static int        s_gun_smooth   = 4;
 #define GUN_SMOOTH_MAX 12
 static int32_t    s_gun_hist_x[GUN_SMOOTH_MAX];
 static int32_t    s_gun_hist_y[GUN_SMOOTH_MAX];
 static int        s_gun_hist_n   = 0;   /* samples held */
 static int        s_gun_hist_i   = 0;   /* write cursor */
+
+/* Median of up to GUN_SMOOTH_MAX samples (insertion sort on a copy). */
+static int32_t median_of(const int32_t *src, int n)
+{
+    int32_t v[GUN_SMOOTH_MAX];
+    for (int i = 0; i < n; ++i) {
+        int32_t x = src[i];
+        int j = i;
+        for (; j > 0 && v[j - 1] > x; --j) v[j] = v[j - 1];
+        v[j] = x;
+    }
+    return v[n / 2];
+}
 
 /* -------------------------------------------------------------------------
  * Video copy buffer
@@ -286,7 +300,7 @@ static struct retro_core_option_v2_definition k_option_defs[] = {
     },
     {
         "hypseus_gun_smooth",
-        "Lightgun Smoothing (samples)",
+        "Lightgun Median Filter (samples)",
         nullptr, nullptr, nullptr, nullptr,
         { {"0", nullptr}, {"2", nullptr}, {"3", nullptr}, {"4", nullptr},
           {"6", nullptr}, {"8", nullptr}, {"12", nullptr}, {nullptr, nullptr} },
@@ -1363,23 +1377,17 @@ void retro_run(void)
         auto set_abs = [&](int rx, int ry, int dz, int smooth) -> bool {
             if (smooth > 1) {
                 if (smooth > GUN_SMOOTH_MAX) smooth = GUN_SMOOTH_MAX;
-                /* A deliberate swing to a new target must not be averaged with
-                 * the old one: drop the history past ~6% of the screen. */
-                if (s_gun_hist_n) {
-                    int32_t ax = 0, ay = 0;
-                    for (int i = 0; i < s_gun_hist_n; ++i) { ax += s_gun_hist_x[i]; ay += s_gun_hist_y[i]; }
-                    if (std::abs(rx - ax / s_gun_hist_n) > 4096 ||
-                        std::abs(ry - ay / s_gun_hist_n) > 4096)
-                        s_gun_hist_n = s_gun_hist_i = 0;
-                }
                 s_gun_hist_x[s_gun_hist_i] = rx;
                 s_gun_hist_y[s_gun_hist_i] = ry;
                 s_gun_hist_i = (s_gun_hist_i + 1) % smooth;
                 if (s_gun_hist_n < smooth) ++s_gun_hist_n;
-                int32_t sx = 0, sy = 0;
-                for (int i = 0; i < s_gun_hist_n; ++i) { sx += s_gun_hist_x[i]; sy += s_gun_hist_y[i]; }
-                rx = sx / s_gun_hist_n;
-                ry = sy / s_gun_hist_n;
+                /* Median, not mean: over a dark part of the picture an optical
+                 * gun loses its lock on the scan line and spits out a wild
+                 * coordinate for a frame or two. A mean smears that outlier
+                 * over the whole window; the median simply drops it, and it
+                 * still cancels the ordinary tremor. */
+                rx = median_of(s_gun_hist_x, s_gun_hist_n);
+                ry = median_of(s_gun_hist_y, s_gun_hist_n);
             }
             int nx = std::max(0, std::min(s_vid_w - 1, (int)((rx + 32767) * s_vid_w / 65534)));
             int ny = std::max(0, std::min(s_vid_h - 1, (int)((ry + 32767) * s_vid_h / 65534)));
