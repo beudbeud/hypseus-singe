@@ -2637,18 +2637,34 @@ void vid_blit()
             int dx_start = std::max(0, -dx0);
             int dx_end   = std::min(dw, vw - dx0);
             if (dx_start >= dx_end) return;
-            /* Bresenham initial state for sx at dx = dx_start (one-time division). */
-            int sx_init     = sx0 + (dx_start * sw) / dw;
-            int sx_err_init = (dx_start * sw) % dw;
+            /* Overlays are mostly transparent: per source row, find the
+             * [xmin,xmax] span with any alpha and only walk the dst pixels
+             * that map into it (dx_lo/dx_hi are widened by the floor, which
+             * is harmless — extra pixels are transparent and skipped). */
+            int prev_sy = -1, dx_lo = 0, dx_hi = 0;
+            int sx_init = 0, sx_err_init = 0;
             for (int dy = 0; dy < dh; ++dy) {
                 int sy   = sy0 + (dy * sh) / dh;
                 int ydst = dy0 + dy;
                 if (ydst < 0 || ydst >= vh) continue;
+                const uint32_t *row_src = &src[sy * src_str];
+                if (sy != prev_sy) {
+                    prev_sy = sy;
+                    int xmin = sw, xmax = -1;
+                    for (int x = 0; x < sw; ++x)
+                        if (row_src[sx0 + x] & 0xFFu) { if (x < xmin) xmin = x; xmax = x; }
+                    if (xmax < 0) { dx_lo = dx_hi = 0; continue; }
+                    dx_lo = std::max(dx_start, (xmin * dw) / sw);
+                    dx_hi = std::min(dx_end, ((xmax + 1) * dw) / sw + 1);
+                    /* Bresenham initial state for sx at dx = dx_lo (one division per row). */
+                    sx_init     = sx0 + (dx_lo * sw) / dw;
+                    sx_err_init = (dx_lo * sw) % dw;
+                }
+                if (dx_lo >= dx_hi) continue;
                 int sx_cur = sx_init;
                 int sx_err = sx_err_init;
-                uint32_t       *row_dst = &dst[ydst * dst_str];
-                const uint32_t *row_src = &src[sy * src_str];
-                for (int dx = dx_start; dx < dx_end; ++dx) {
+                uint32_t *row_dst = &dst[ydst * dst_str];
+                for (int dx = dx_lo; dx < dx_hi; ++dx) {
                     uint32_t sp = row_src[sx_cur]; /* RGBA8888 */
                     uint8_t  sa = sp & 0xFFu;      /* A = low byte */
                     if (sa != 0) {
