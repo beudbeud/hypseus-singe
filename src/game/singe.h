@@ -39,7 +39,7 @@
 using namespace std;
 
 // by rdg2010
-#define SINGE_VERSION 1.9006 // Update this number whenever you issue a major change
+#define SINGE_VERSION 1.9007 // Update this number whenever you issue a major change
 
 #define SDL_MOUSE 100
 #define MANY_MOUSE 200
@@ -144,11 +144,6 @@ class singe : public game
         return g_ldp->get_es_status();
     }
 
-    static void set_singe_errors(short value)
-    {
-        g_ldp->set_runtime_error(value);
-    }
-
     static bool switch_altaudio(const char* suffix)
     {
         return g_ldp->switch_altaudio(suffix);
@@ -239,6 +234,12 @@ class singe : public game
     {
         singe *pSingeInstance = (singe *)pInstance;
         pSingeInstance->bezel_enable(bEnable);
+    }
+
+    static bool gfm_overlay_unmask(void *pInstance)
+    {
+        singe *pSingeInstance = (singe *)pInstance;
+        return pSingeInstance->overlay_unmask();
     }
 
     static bool gfm_bezel_is_enabled(void *pInstance)
@@ -362,6 +363,7 @@ class singe : public game
 
     void joymouse_enable(bool);
     bool m_bezel_scoreboard;
+    bool overlay_unmask();
     bool singe_joymouse;
     bool singe_trace;
     bool m_crosshair;

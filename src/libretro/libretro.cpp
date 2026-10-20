@@ -1297,7 +1297,6 @@ void retro_unload_game(void)
     sound::shutdown();
     video::free_bmps();
     video::deinit_display();
-    video::shutdown_display();
 
     if (g_game) { delete g_game; g_game = nullptr; }
     if (g_ldp)  { delete g_ldp;  g_ldp  = nullptr; }
