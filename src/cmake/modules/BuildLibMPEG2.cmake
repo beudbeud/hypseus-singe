@@ -17,7 +17,9 @@ check_c_compiler_flag(
     HAVE_DEPRECATED_NON_PROTOTYPE
 )
 
-set( LIBMPEG2_CFLAGS "-std=gnu89" )
+# Carry the target flags (-mcpu, -O) into the external build: make CFLAGS=
+# replaces configure's -g -O2, and libmpeg2 has no aarch64 asm to fall back on.
+set( LIBMPEG2_CFLAGS "-std=gnu89 ${CMAKE_C_FLAGS}" )
 
 if( HAVE_DEPRECATED_NON_PROTOTYPE )
     string( APPEND LIBMPEG2_CFLAGS " -Wno-deprecated-non-prototype" )
