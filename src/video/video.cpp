@@ -91,7 +91,7 @@ static SDL_Surface *g_lr_surface         = NULL;    /* off-screen render target 
 /* Serializes vid_setup_yuv_overlay() (VLDP thread) against vid_blit() (emu thread). */
 static SDL_mutex   *g_yuv_lifecycle_mutex = NULL;
 static bool         g_lr_scoreboard_visible = true;
-static void       (*g_frame_ready_hook)()   = nullptr;
+static void       (*g_frame_ready_hook)(bool) = nullptr;
 #endif
 SDL_Texture *g_aux_texture         = NULL;
 SDL_Texture *g_rtr_texture         = NULL;
@@ -1292,6 +1292,7 @@ void draw_overlay_leds(unsigned int values[], int num_digits,
         src.x = values[i] * OVERLAY_LED_WIDTH;
 
         SDL_FillRect(g_blit_surface, &dest, 0x00000000);
+        g_overlay_needs_update = true;
         if (SDL_BlitSurface(g_other_bmps[B_OVERLAY_LEDS], &src, g_blit_surface, &dest) != 0) {
             LOGE << fmt("Could not Blit Overlay LED's: %s", SDL_GetError());
             set_quitflag();
@@ -1354,6 +1355,7 @@ void draw_singleline_LDP1450(char *LDP1450_String, int start_x, int y)
 
          src.x = value * OVERLAY_LDP1450_WIDTH;
          SDL_FillRect(g_blit_surface, &dest, 0x00000000);
+         g_overlay_needs_update = true;
          if (SDL_BlitSurface(g_other_bmps[B_OVERLAY_LDP1450], &src, g_blit_surface, &dest) != 0)
          {
              LOGE << fmt("Could not draw LDP1450 line: %s", SDL_GetError());
@@ -1417,8 +1419,8 @@ SDL_Surface *get_lr_surface() {
 #endif
 }
 
-void vid_set_scoreboard_visible(bool visible) { g_lr_scoreboard_visible = visible; }
-void vid_set_frame_ready_hook(void (*hook)()) { g_frame_ready_hook      = hook;    }
+void vid_set_scoreboard_visible(bool visible) { g_lr_scoreboard_visible = visible; g_overlay_needs_update = true; }
+void vid_set_frame_ready_hook(void (*hook)(bool)) { g_frame_ready_hook  = hook;    }
 SDL_Texture *get_screen() { return g_overlay_texture; }
 SDL_Surface *get_screen_blitter() { return g_overlay_blitter; }
 SDL_Texture *get_yuv_screen() { return g_yuv_texture; }
@@ -2522,10 +2524,16 @@ void vid_blit()
     /* Convert YUV→ARGB8888 manually: SDL software renderer YUV blit is broken
      * on V3D/Mesa (black output). g_lr_surface is ARGB8888 so alpha compositing
      * below correctly skips transparent overlay pixels. */
+    /* Redraw only when the video or the overlay changed: the core runs at
+     * 59.94 Hz but MPEG frames arrive at 29.97, so half the frames are dupes.
+     * A redraw always rewrites the YUV region before compositing — blending
+     * the overlay twice onto the same pixels would thicken its alpha. */
+    bool frame_changed = true;
     if (g_yuv_lifecycle_mutex) SDL_LockMutex(g_yuv_lifecycle_mutex);
     if (g_yuv_surface && g_lr_surface) {
         SDL_LockMutex(g_yuv_surface->mutex);
-        if (g_yuv_video_needs_update) {
+        frame_changed = g_yuv_video_needs_update || g_overlay_needs_update;
+        if (frame_changed) {
             g_yuv_video_needs_update = false;
 
             int bw = g_yuv_surface->width, bh = g_yuv_surface->height;
@@ -2615,6 +2623,10 @@ void vid_blit()
     if (g_overlay_texture)
         SDL_RenderCopy(g_renderer, g_overlay_texture, &g_render_size_rect, &g_scaling_rect);
 #else
+    if (!frame_changed) {
+        if (g_frame_ready_hook) g_frame_ready_hook(false);
+        return;
+    }
     /* Composite overlay surfaces onto g_lr_surface.
      * Overlay src is RGBA8888 (A=low byte); dst is ARGB8888 (A=high byte). */
     if (g_lr_surface) {
@@ -2710,7 +2722,7 @@ void vid_blit()
     g_overlay_needs_update = false;
 #endif
 
-    if (g_frame_ready_hook) g_frame_ready_hook();
+    if (g_frame_ready_hook) g_frame_ready_hook(true);
 
     if (g_aux_needs_update) vid_render_aux();
 

@@ -135,7 +135,7 @@ SDL_Window *get_window();
 SDL_Renderer *get_renderer();
 SDL_Surface *get_lr_surface();
 void vid_set_scoreboard_visible(bool visible);
-void vid_set_frame_ready_hook(void (*hook)());
+void vid_set_frame_ready_hook(void (*hook)(bool frame_changed));
 SDL_Texture *get_screen();
 SDL_Texture *get_yuv_screen();
 SDL_Surface *get_screen_blitter();

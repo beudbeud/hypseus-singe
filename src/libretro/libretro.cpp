@@ -88,6 +88,8 @@ static int         s_vid_h          = 480;
  * and cleared by retro_run() (libretro thread) to issue SET_GEOMETRY before
  * passing the first resized frame to the frontend. */
 static SDL_atomic_t s_geometry_changed = {0};
+/* 0 when the emu thread produced an unchanged frame: retro_run() dupes it. */
+static SDL_atomic_t s_frame_changed     = {1};
 #ifdef DEBUG
 static int          s_pix_logged       = 0; /* debug pixel log counter, reset on resize */
 #endif
@@ -353,8 +355,9 @@ static const int k_btn_map_size = (int)(sizeof(k_btn_map) / sizeof(k_btn_map[0])
  * Signals the libretro thread that a frame is ready, then waits for it to
  * consume the frame before returning so the emu thread can reuse the surface.
  */
-void libretro_submit_video()
+void libretro_submit_video(bool frame_changed)
 {
+    SDL_AtomicSet(&s_frame_changed, frame_changed ? 1 : 0);
     if (!s_frame_produced || !s_frame_consumed || !video_cb)
         return;
 
@@ -1473,7 +1476,7 @@ void retro_run(void)
          * standalone at 60 Hz.  s_video_buf is only touched here (retro_run
          * thread) so no locking is needed. */
         SDL_Surface *lr = video::get_lr_surface();
-        if (lr && lr->pixels) {
+        if (lr && lr->pixels && SDL_AtomicGet(&s_frame_changed)) {
             /* Use lr->w/h rather than s_vid_w/h: game::resize() may have
              * recreated g_lr_surface before s_vid_w was updated. */
             unsigned lrw = (unsigned)lr->w;
