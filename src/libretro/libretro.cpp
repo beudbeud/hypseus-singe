@@ -52,6 +52,8 @@
 /* Emulator headers — order matters: game/ldp types must precede globals.h */
 #include "../game/game.h"
 #include "../game/singe.h"
+#include "../game/lair.h"
+#include "../game/thayers.h"
 #include "../ldp-out/ldp.h"
 #include "../ldp-out/ldp-vldp.h"
 #define DEFINE_GLOBALS
@@ -128,6 +130,7 @@ static unsigned   s_port_device  = RETRO_DEVICE_JOYPAD;
 /* Ignore gun movement below this many pixels: an optical gun always trembles
  * a couple of pixels around the aim point. 0 = raw. */
 static int        s_gun_deadzone = 2;
+static bool       s_original_overlay = false; /* hypseus_original_overlay */
 /* Median filter width over the raw absolute samples: an optical gun jitters
  * well past any sane deadzone, and loses its lock outright on dark scenes.
  * 0/1 = off. */
@@ -280,6 +283,13 @@ static struct retro_core_option_v2_definition k_option_defs[] = {
     {
         "hypseus_scoreboard",
         "Scoreboard Overlay",
+        nullptr, nullptr, nullptr, nullptr,
+        { {"enabled", nullptr}, {"disabled", nullptr}, {nullptr, nullptr} },
+        "enabled"
+    },
+    {
+        "hypseus_original_overlay",
+        "Original Scoreboard Overlay (lair/ace/tq)",
         nullptr, nullptr, nullptr, nullptr,
         { {"enabled", nullptr}, {"disabled", nullptr}, {nullptr, nullptr} },
         "enabled"
@@ -1007,6 +1017,7 @@ bool retro_load_game(const struct retro_game_info *info)
         if (strcmp(getcore("hypseus_blank_skips"),    "enabled")  == 0) str_args.push_back("-blank_skips");
         if (strcmp(getcore("hypseus_cheat"),          "enabled")  == 0) str_args.push_back("-cheat");
         if (strcmp(getcore("hypseus_crosshair"),      "disabled") == 0) str_args.push_back("-nocrosshair");
+        s_original_overlay = strcmp(getcore("hypseus_original_overlay"), "enabled") == 0;
         { const char *dz = getcore("hypseus_gun_deadzone");
           if (*dz) s_gun_deadzone = atoi(dz);
           const char *sm = getcore("hypseus_gun_smooth");
@@ -1092,6 +1103,12 @@ bool retro_load_game(const struct retro_game_info *info)
         TTF_Quit(); IMG_Quit(); SDL_QuitSubSystem(SDL_INIT_TIMER | SDL_INIT_AUDIO);
         return false;
     }
+
+    /* Like -original_overlay (which parse_cmd_line rejects for other games,
+     * so decide here once g_game exists) but keeping the red LEDs. */
+    if (s_original_overlay &&
+        (dynamic_cast<lair *>(g_game) || dynamic_cast<thayers *>(g_game)))
+        video::set_legacy_overlay(true);
 
     /* ------------------------------------------------------------------ */
     /* 6. Initialise plog so subsystem LOGE/LOGI calls are visible         */
