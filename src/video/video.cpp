@@ -34,6 +34,9 @@
 #include "../io/mpo_mem.h"
 #include "icon.h"
 #include "video.h"
+#ifdef LIBRETRO_CORE
+#include "yuv2argb.h"
+#endif
 #include <SDL_syswm.h> // rdg2010
 #include <SDL_image.h> // screenshot
 #include <plog/Log.h>
@@ -87,8 +90,6 @@ SDL_Texture *g_bezel_texture       = NULL;
 static SDL_Surface *g_lr_surface         = NULL;    /* off-screen render target for libretro */
 /* Serializes vid_setup_yuv_overlay() (VLDP thread) against vid_blit() (emu thread). */
 static SDL_mutex   *g_yuv_lifecycle_mutex = NULL;
-static uint32_t    *g_yuv_argb_buf          = nullptr; /* YUV→ARGB scratch (sized to YUV dims) */
-static int          g_yuv_argb_size         = 0;       /* in pixels */
 static bool         g_lr_scoreboard_visible = true;
 static void       (*g_frame_ready_hook)()   = nullptr;
 #endif
@@ -997,7 +998,6 @@ bool deinit_display()
 #ifdef LIBRETRO_CORE
     if (g_lr_surface)          { SDL_FreeSurface(g_lr_surface);          g_lr_surface          = NULL; }
     if (g_yuv_lifecycle_mutex) { SDL_DestroyMutex(g_yuv_lifecycle_mutex); g_yuv_lifecycle_mutex = NULL; }
-    delete[] g_yuv_argb_buf;   g_yuv_argb_buf   = nullptr; g_yuv_argb_size   = 0;
 #endif
 
     return (true);
@@ -2542,66 +2542,20 @@ void vid_blit()
                     memset(g_lr_surface->pixels, 0, frame_bytes);
                 }
             } else {
-                /* The three planes are one contiguous YV12 block (see
-                 * vid_setup_yuv_overlay), so SDL_ConvertPixels reads them in
-                 * place — no packing copy.
+                /* Fused YV12→ARGB + nearest-neighbour scale straight into the
+                 * render surface (NEON on ARM — SDL's converter is SSE-only).
                  * Do not clear the surface — the overlay is composited on top
                  * every frame and must survive across YUV updates. */
-                uint32_t *dst     = (uint32_t *)g_lr_surface->pixels;
-                int       dst_str = g_lr_surface->pitch / 4;
-                int       vw      = g_lr_surface->w;
-                int       vh      = g_lr_surface->h;
-
+                int vw = g_lr_surface->w, vh = g_lr_surface->h;
                 int dx0 = g_scaling_rect.x, dy0 = g_scaling_rect.y;
                 int dw  = g_scaling_rect.w, dh  = g_scaling_rect.h;
                 if (dw <= 0 || dh <= 0) { dx0 = 0; dy0 = 0; dw = vw; dh = vh; }
 
-                if (dw == bw && dh == bh && dx0 >= 0 && dy0 >= 0 &&
-                    dx0 + bw <= vw && dy0 + bh <= vh) {
-                    /* Unscaled — the default, since the viewport is the probed
-                     * video size. Convert straight into the render surface:
-                     * no ARGB scratch, no scaling pass. */
-                    SDL_ConvertPixels(bw, bh,
-                        SDL_PIXELFORMAT_YV12,     g_yuv_surface->Yplane, bw,
-                        SDL_PIXELFORMAT_ARGB8888, &dst[dy0 * dst_str + dx0],
-                        g_lr_surface->pitch);
-                } else {
-                    /* Scaled: convert to a scratch buffer sized to the YUV
-                     * dims, then nearest-neighbour scale into g_scaling_rect. */
-                    int argb_need = bw * bh;
-                    if (argb_need > g_yuv_argb_size) {
-                        delete[] g_yuv_argb_buf;
-                        g_yuv_argb_buf  = new uint32_t[argb_need];
-                        g_yuv_argb_size = argb_need;
-                    }
-                    SDL_ConvertPixels(bw, bh,
-                        SDL_PIXELFORMAT_YV12,     g_yuv_surface->Yplane, bw,
-                        SDL_PIXELFORMAT_ARGB8888, g_yuv_argb_buf,   bw * 4);
-
-                    int dx_start = std::max(0, -dx0);
-                    int dx_end   = std::min(dw, vw - dx0);
-                    int dy_start = std::max(0, -dy0);
-                    int dy_end   = std::min(dh, vh - dy0);
-                    /* Bresenham initial state for sx at dx_start: one division
-                     * per row instead of one per pixel (sdiv is ~10 cycles on
-                     * a Cortex-A72). */
-                    int sx_init     = (dx_start * bw) / dw;
-                    int sx_err_init = (dx_start * bw) % dw;
-                    int sx_step     = bw / dw;   /* >0 when downscaling */
-                    int sx_rem      = bw % dw;
-                    for (int dy = dy_start; dy < dy_end; ++dy) {
-                        int sy = (dy * bh) / dh;
-                        const uint32_t *row_src = &g_yuv_argb_buf[sy * bw];
-                        uint32_t       *row_dst = &dst[(dy0 + dy) * dst_str + dx0];
-                        int sx_cur = sx_init, sx_err = sx_err_init;
-                        for (int dx = dx_start; dx < dx_end; ++dx) {
-                            row_dst[dx] = row_src[sx_cur];
-                            sx_cur += sx_step;
-                            sx_err += sx_rem;
-                            if (sx_err >= dw) { sx_cur++; sx_err -= dw; }
-                        }
-                    }
-                }
+                yv12_to_argb_scaled(g_yuv_surface->Yplane, g_yuv_surface->Uplane,
+                    g_yuv_surface->Vplane, g_yuv_surface->Ypitch,
+                    g_yuv_surface->Upitch, g_yuv_surface->Vpitch, bw, bh,
+                    (uint32_t *)g_lr_surface->pixels, g_lr_surface->pitch / 4,
+                    vw, vh, dx0, dy0, dw, dh);
             }
         }
         SDL_UnlockMutex(g_yuv_surface->mutex);
