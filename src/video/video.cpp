@@ -1384,15 +1384,23 @@ void free_bmps()
 SDL_Renderer *get_renderer() { return g_renderer; }
 #ifdef LIBRETRO_CORE
 /* Singe (32-bit overlays) updates the overlay texture directly; the core
- * composites from g_overlay_surface, so mirror the pixels there. */
+ * composites from g_overlay_surface, so mirror the pixels there.
+ * Upstream creates that texture as ARGB8888 for the "full" overlay mode and
+ * Singe writes ARGB words into it; g_overlay_surface is RGBA8888, so rotate
+ * them (compositing would otherwise read the blue channel as alpha). */
 void vid_update_overlay_pixels(SDL_Surface *src)
 {
     if (!g_overlay_surface || !src || src->w != g_overlay_surface->w ||
         src->h != g_overlay_surface->h) return;
+    bool argb = g_game && g_game->get_overlay_depth() == GAME_OVERLAY_FULL &&
+                !g_game->has_overlay_upgrade(GAME_OVERLAY_ALPHA);
     size_t row = (size_t)std::min(src->pitch, g_overlay_surface->pitch);
-    for (int y = 0; y < src->h; ++y)
-        memcpy((uint8_t *)g_overlay_surface->pixels + (size_t)y * g_overlay_surface->pitch,
-               (const uint8_t *)src->pixels + (size_t)y * src->pitch, row);
+    for (int y = 0; y < src->h; ++y) {
+        uint32_t *d = (uint32_t *)((uint8_t *)g_overlay_surface->pixels + (size_t)y * g_overlay_surface->pitch);
+        const uint32_t *s = (const uint32_t *)((const uint8_t *)src->pixels + (size_t)y * src->pitch);
+        if (!argb) { memcpy(d, s, row); continue; }
+        for (int x = 0; x < src->w; ++x) d[x] = (s[x] << 8) | (s[x] >> 24);
+    }
     g_overlay_needs_update = true;
 }
 #endif
