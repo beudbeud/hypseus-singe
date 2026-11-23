@@ -345,13 +345,13 @@ static const BtnMap k_btn_map[] = {
     { RETRO_DEVICE_ID_JOYPAD_RIGHT,  SWITCH_RIGHT   },
     { RETRO_DEVICE_ID_JOYPAD_START,  SWITCH_START1  },
     { RETRO_DEVICE_ID_JOYPAD_SELECT, SWITCH_COIN1   },
-    { RETRO_DEVICE_ID_JOYPAD_A,      SWITCH_BUTTON1 },
-    { RETRO_DEVICE_ID_JOYPAD_B,      SWITCH_BUTTON2 },
-    { RETRO_DEVICE_ID_JOYPAD_X,      SWITCH_BUTTON3 },
+    { RETRO_DEVICE_ID_JOYPAD_B,      SWITCH_BUTTON1 },
+    { RETRO_DEVICE_ID_JOYPAD_A,      SWITCH_BUTTON2 },
+    { RETRO_DEVICE_ID_JOYPAD_Y,      SWITCH_BUTTON3 },
     { RETRO_DEVICE_ID_JOYPAD_L,      SWITCH_SKILL1  },
     { RETRO_DEVICE_ID_JOYPAD_R,      SWITCH_SKILL2  },
     { RETRO_DEVICE_ID_JOYPAD_L2,     SWITCH_SERVICE },
-    { RETRO_DEVICE_ID_JOYPAD_Y,      SWITCH_PAUSE   },
+    { RETRO_DEVICE_ID_JOYPAD_X,      SWITCH_PAUSE   },
 };
 static const int k_btn_map_size = (int)(sizeof(k_btn_map) / sizeof(k_btn_map[0]));
 
@@ -662,8 +662,8 @@ void retro_set_environment(retro_environment_t cb)
 
     static const struct retro_input_descriptor input_desc[] = {
         /* Joypad */
-        { 0, RETRO_DEVICE_JOYPAD,   0, RETRO_DEVICE_ID_JOYPAD_A,      "Fire / Trigger" },
-        { 0, RETRO_DEVICE_JOYPAD,   0, RETRO_DEVICE_ID_JOYPAD_B,      "Reload" },
+        { 0, RETRO_DEVICE_JOYPAD,   0, RETRO_DEVICE_ID_JOYPAD_B,      "Fire / Trigger" },
+        { 0, RETRO_DEVICE_JOYPAD,   0, RETRO_DEVICE_ID_JOYPAD_A,      "Reload" },
         { 0, RETRO_DEVICE_JOYPAD,   0, RETRO_DEVICE_ID_JOYPAD_START,  "Start" },
         { 0, RETRO_DEVICE_JOYPAD,   0, RETRO_DEVICE_ID_JOYPAD_SELECT, "Coin" },
         /* Lightgun */
